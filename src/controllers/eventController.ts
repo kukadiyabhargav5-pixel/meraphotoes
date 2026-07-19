@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import QRCode from 'qrcode';
 import { AuthRequest } from '../middlewares/auth';
 import { Event, Studio, User, Media } from '../models';
+import Customer from '../models/Customer';
 
 /**
  * Creates a new event
@@ -82,6 +83,30 @@ export const createEvent = async (req: AuthRequest, res: Response) => {
       addToPortfolio: addToPortfolio || false,
       watermark: watermark || { isActive: false, type: 'LOGO', position: 'BOTTOM_RIGHT', width: 20, height: 20, opacity: 0.5 },
     });
+
+    // Auto-sync client to Customers directory
+    try {
+      let customer = await Customer.findOne({ 
+        studioId: studio._id, 
+        $or: [ { phone: clientMobile }, { email: clientEmail } ]
+      });
+
+      if (!customer) {
+        await Customer.create({
+          studioId: studio._id,
+          name: clientName,
+          phone: clientMobile,
+          email: clientEmail,
+          totalEvents: 1,
+          status: 'Active'
+        });
+      } else {
+        customer.totalEvents = (customer.totalEvents || 0) + 1;
+        await customer.save();
+      }
+    } catch (custErr) {
+      console.error('Error syncing customer:', custErr);
+    }
 
     return res.status(201).json({ message: 'Event created successfully', event: newEvent });
   } catch (err: any) {

@@ -10,6 +10,7 @@ const shootLogSchema = new mongoose.Schema({
   videographersCount: { type: Number, default: 0 },
   photographersNames: [{ type: String }],
   videographersNames: [{ type: String }],
+  location: { type: String },
   notes: { type: String },
   createdAt: { type: Date, default: Date.now }
 });

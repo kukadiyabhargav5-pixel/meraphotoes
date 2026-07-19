@@ -129,6 +129,15 @@ router.delete('/customers/:id', async (req: AuthRequest, res) => {
   }
 });
 
+router.put('/customers/:id', async (req: AuthRequest, res) => {
+  try {
+    const updated = await Customer.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    res.json(updated);
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // --- TEAM ---
 router.get('/team', async (req: AuthRequest, res) => {
   try {
@@ -157,6 +166,15 @@ router.delete('/team/:id', async (req: AuthRequest, res) => {
   try {
     await Team.findByIdAndDelete(req.params.id);
     res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+router.put('/team/:id', async (req: AuthRequest, res) => {
+  try {
+    const updated = await Team.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    res.json(updated);
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
   }
@@ -256,6 +274,15 @@ router.delete('/bills/:id', async (req: AuthRequest, res) => {
   try {
     await Bill.findByIdAndDelete(req.params.id);
     res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+router.put('/bills/:id', async (req: AuthRequest, res) => {
+  try {
+    const updated = await Bill.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    res.json(updated);
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
   }

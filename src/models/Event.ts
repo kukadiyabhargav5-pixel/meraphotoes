@@ -7,7 +7,7 @@ export interface IEvent extends Document {
   clientMobile: string;
   clientEmail: string;
   date: Date;
-  type: 'WEDDING' | 'PRE_WEDDING' | 'RECEPTION' | 'BIRTHDAY' | 'CORPORATE' | 'SCHOOL' | 'GARBA' | 'CONCERT' | 'RELIGIOUS';
+  type: 'WEDDING' | 'PRE_WEDDING' | 'PRE WEDDING' | 'RECEPTION' | 'BIRTHDAY' | 'CORPORATE' | 'SCHOOL' | 'GARBA' | 'CONCERT' | 'RELIGIOUS' | 'ENGAGEMENT' | 'BABY SHOWER' | 'PANCHMASI';
   coverImageUrl?: string;
   description?: string;
   location?: string;
@@ -39,7 +39,7 @@ const EventSchema = new Schema<IEvent>({
   date: { type: Date, required: true },
   type: {
     type: String,
-    enum: ['WEDDING', 'PRE_WEDDING', 'RECEPTION', 'BIRTHDAY', 'CORPORATE', 'SCHOOL', 'GARBA', 'CONCERT', 'RELIGIOUS'],
+    enum: ['WEDDING', 'PRE_WEDDING', 'PRE WEDDING', 'RECEPTION', 'BIRTHDAY', 'CORPORATE', 'SCHOOL', 'GARBA', 'CONCERT', 'RELIGIOUS', 'ENGAGEMENT', 'BABY SHOWER', 'PANCHMASI'],
     required: true
   },
   coverImageUrl: { type: String },
