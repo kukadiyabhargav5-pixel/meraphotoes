@@ -9,34 +9,30 @@ const razorpay = new Razorpay({
   key_secret: process.env.RAZORPAY_KEY_SECRET || 'mock_secret',
 });
 
-/**
- * Maps subscription tiers to Razorpay Plan IDs
- */
-export const PLAN_IDS = {
-  STARTER: 'plan_starter_id',
-  PROFESSIONAL: 'plan_professional_id',
-  BUSINESS: 'plan_business_id',
-  ENTERPRISE: 'plan_enterprise_id',
+export const PLAN_PRICES = {
+  BASIC: 0,
+  STANDARD: 4900,
+  ESSENTIAL: 14900,
+  PREMIUM: 31900,
 };
 
 /**
- * Creates a subscription inside Razorpay for a studio
+ * Creates a one-time order inside Razorpay for a studio plan
  */
-export const createSubscription = async (planKey: keyof typeof PLAN_IDS) => {
-  const planId = PLAN_IDS[planKey];
-  return razorpay.subscriptions.create({
-    plan_id: planId,
-    customer_notify: 1, // notify customer directly via Razorpay
-    total_count: 12, // 1 year of monthly iterations (can adapt for recurring billing)
-    quantity: 1,
+export const createOrder = async (planKey: keyof typeof PLAN_PRICES, receiptId: string) => {
+  const amount = PLAN_PRICES[planKey];
+  return razorpay.orders.create({
+    amount: amount * 100, // in paise
+    currency: 'INR',
+    receipt: receiptId,
   });
 };
 
 /**
- * Cancels an active Razorpay subscription at the end of the current billing cycle
+ * Cancels an active Razorpay subscription (mocked since we use one-time orders now)
  */
 export const cancelSubscription = async (subscriptionId: string) => {
-  return razorpay.subscriptions.cancel(subscriptionId, true);
+  return true;
 };
 
 /**

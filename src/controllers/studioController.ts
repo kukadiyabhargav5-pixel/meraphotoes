@@ -58,6 +58,17 @@ export const updateMyStudio = async (req: AuthRequest, res: Response) => {
   try {
     if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
 
+    // Update user profile if provided
+    const { userName, userPhone } = req.body;
+    if (userName !== undefined || userPhone !== undefined) {
+      const user = await User.findById(req.user._id);
+      if (user) {
+        if (userName !== undefined) user.name = userName;
+        if (userPhone !== undefined) user.phone = userPhone;
+        await user.save();
+      }
+    }
+
     const studio = await Studio.findOne({ ownerId: req.user._id });
     if (!studio) {
       return res.status(404).json({ error: 'Studio profile not found' });

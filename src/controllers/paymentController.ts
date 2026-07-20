@@ -1,10 +1,17 @@
 import { Request, Response } from 'express';
 import { AuthRequest } from '../middlewares/auth';
 import { Studio } from '../models';
-import { createSubscription, cancelSubscription, verifyWebhookSignature } from '../services/RazorpayService';
+import { createOrder, cancelSubscription, verifyWebhookSignature } from '../services/RazorpayService';
 
 /**
- * Initiates Razorpay subscription billing session
+ * Returns Razorpay configuration details
+ */
+export const getPaymentConfig = (req: Request, res: Response) => {
+  return res.json({ keyId: process.env.RAZORPAY_KEY_ID });
+};
+
+/**
+ * Initiates Razorpay order billing session
  */
 export const createBillingSession = async (req: AuthRequest, res: Response) => {
   const { plan } = req.body; // 'BASIC' | 'STANDARD' | 'ESSENTIAL' | 'PREMIUM'
@@ -18,27 +25,24 @@ export const createBillingSession = async (req: AuthRequest, res: Response) => {
     const studio = await Studio.findOne({ ownerId: req.user._id });
     if (!studio) return res.status(404).json({ error: 'Studio not found' });
 
-    // Call Razorpay API to generate Subscription details (try-catch wrapper for local testing)
-    let subscriptionId = 'sub_mock_id_' + Date.now();
-    let shortUrl = 'http://localhost:3000/dashboard';
+    // Call Razorpay API to generate Order details
+    let orderId = 'sub_mock_id_' + Date.now(); // keeping 'sub_mock_id_' prefix for local bypass fallback
     try {
-      const razorpaySub = await createSubscription(plan);
-      subscriptionId = razorpaySub.id;
-      shortUrl = razorpaySub.short_url;
+      const razorpayOrder = await createOrder(plan as any, `rcpt_${studio._id}`);
+      orderId = razorpayOrder.id;
     } catch (razorpayErr: any) {
-      console.warn('Razorpay subscription creation failed, falling back to local DB checkout:', razorpayErr.message);
+      console.warn('Razorpay order creation failed, falling back to local DB checkout:', razorpayErr.message);
     }
 
-    // Save subscription details immediately
-    studio.razorpaySubscriptionId = subscriptionId;
+    // Save order details (we are just mocking immediate success for now, in production rely on webhook)
+    studio.razorpaySubscriptionId = orderId;
     studio.subscriptionPlan = plan;
     studio.subscriptionStatus = 'ACTIVE';
     await studio.save();
 
     return res.json({
-      subscriptionId,
-      shortUrl,
-      message: 'Subscription created successfully'
+      subscriptionId: orderId, // returning as subscriptionId so frontend doesn't need to change variables
+      message: 'Checkout initialized successfully'
     });
   } catch (err: any) {
     console.error('Razorpay Session Error:', err);

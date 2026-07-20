@@ -13,6 +13,9 @@ const billSchema = new mongoose.Schema({
   status: { type: String, enum: ['Paid', 'Pending', 'Overdue'], default: 'Pending' },
   issueDate: { type: Date },
   dueDate: { type: Date },
+  eventDate: { type: Date },
+  tokenPaymentDate: { type: Date },
+  paymentMethod: { type: String, enum: ['Cash', 'Online'], default: 'Online' },
   createdAt: { type: Date, default: Date.now }
 });
 

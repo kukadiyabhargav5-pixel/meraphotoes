@@ -4,6 +4,7 @@ import QRCode from 'qrcode';
 import { AuthRequest } from '../middlewares/auth';
 import { Event, Studio, User, Media } from '../models';
 import Customer from '../models/Customer';
+import { sendAdminNotificationEmail } from '../services/EmailService';
 
 /**
  * Creates a new event
@@ -19,6 +20,10 @@ export const createEvent = async (req: AuthRequest, res: Response) => {
     coverImageUrl,
     description,
     location,
+    time,
+    isMultiDay,
+    totalDays,
+    days,
     accessType,
     password,
     assignedTeamEmails,
@@ -76,6 +81,10 @@ export const createEvent = async (req: AuthRequest, res: Response) => {
       coverImageUrl,
       description,
       location,
+      time,
+      isMultiDay,
+      totalDays,
+      days,
       accessType,
       passwordHash,
       studioId: studio._id,
@@ -107,6 +116,12 @@ export const createEvent = async (req: AuthRequest, res: Response) => {
     } catch (custErr) {
       console.error('Error syncing customer:', custErr);
     }
+
+    // Notify Admin
+    sendAdminNotificationEmail(
+      `New Event Created: ${newEvent.name}`, 
+      `<p>A new event has been created on Mara Photo.</p><p>Event Name: ${newEvent.name}</p><p>Client: ${newEvent.clientName}</p><p>Studio ID: ${studio._id}</p>`
+    ).catch(err => console.error("Admin Notification Failed:", err));
 
     return res.status(201).json({ message: 'Event created successfully', event: newEvent });
   } catch (err: any) {
@@ -235,6 +250,10 @@ export const updateEvent = async (req: AuthRequest, res: Response) => {
     coverImageUrl,
     description,
     location,
+    time,
+    isMultiDay,
+    totalDays,
+    days,
     accessType,
     password,
     watermark,
@@ -276,6 +295,10 @@ export const updateEvent = async (req: AuthRequest, res: Response) => {
     if (coverImageUrl !== undefined) event.coverImageUrl = coverImageUrl;
     if (description !== undefined) event.description = description;
     if (location !== undefined) event.location = location;
+    if (time !== undefined) event.time = time;
+    if (isMultiDay !== undefined) event.isMultiDay = isMultiDay;
+    if (totalDays !== undefined) event.totalDays = totalDays;
+    if (days !== undefined) event.days = days;
     if (addToPortfolio !== undefined) event.addToPortfolio = addToPortfolio;
 
     if (accessType) {

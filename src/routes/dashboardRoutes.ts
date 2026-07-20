@@ -154,6 +154,13 @@ router.post('/team', async (req: AuthRequest, res) => {
   try {
     const studio = await Studio.findOne({ ownerId: req.user!._id });
     if (!studio) return res.status(403).json({ error: 'Studio not found' });
+    
+    // Check for duplicates
+    const existingMember = await Team.findOne({ studioId: studio._id, email: req.body.email });
+    if (existingMember) {
+      return res.status(400).json({ error: 'Team member with this email already exists' });
+    }
+
     const member = new Team({ ...req.body, studioId: studio._id });
     await member.save();
     res.json(member);
@@ -241,6 +248,19 @@ router.delete('/quotations/:id', async (req: AuthRequest, res) => {
   try {
     await Quotation.findByIdAndDelete(req.params.id);
     res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+router.put('/quotations/:id', async (req: AuthRequest, res) => {
+  try {
+    const quotation = await Quotation.findByIdAndUpdate(
+      req.params.id,
+      { $set: req.body },
+      { new: true }
+    );
+    res.json(quotation);
   } catch (error) {
     res.status(500).json({ error: 'Server error' });
   }

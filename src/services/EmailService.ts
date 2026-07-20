@@ -160,3 +160,11 @@ export const sendWelcomeEmail = async (to: string, name: string = 'User', isStud
   `;
   return sendEmail(to, subject, html);
 };
+
+/**
+ * Sends a notification to the admin email
+ */
+export const sendAdminNotificationEmail = async (subject: string, html: string): Promise<any> => {
+  const adminEmail = process.env.SMTP_FROM || 'maraphoto303@gmail.com';
+  return sendEmail(adminEmail, subject, html);
+};

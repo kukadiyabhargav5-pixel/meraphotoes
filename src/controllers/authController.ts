@@ -2,8 +2,11 @@ import { Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { User, Studio } from '../models';
-import { sendOTPEmail, sendWelcomeEmail } from '../services/EmailService';
+import { sendOTPEmail, sendWelcomeEmail, sendAdminNotificationEmail } from '../services/EmailService';
 import { AuthRequest } from '../middlewares/auth';
+import { OAuth2Client } from 'google-auth-library';
+
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 const JWT_SECRET = process.env.JWT_SECRET || 'default_super_secret_jwt_access_token_key_1234';
 const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || 'default_super_secret_jwt_refresh_token_key_5678';
@@ -75,6 +78,12 @@ export const registerStudioOwner = async (req: Request, res: Response) => {
 
     // Send Welcome Email asynchronously (don't block the response)
     sendWelcomeEmail(newUser.email, newUser.name, true).catch(err => console.error("Welcome Email Failed:", err));
+    
+    // Notify Admin
+    sendAdminNotificationEmail(
+      `New Studio Registration: ${newUser.name}`, 
+      `<p>A new studio has registered on Mara Photo.</p><p>Name: ${newUser.name}</p><p>Email: ${newUser.email}</p><p>Phone: ${newUser.phone}</p><p>Studio Name: ${newStudio.name}</p>`
+    ).catch(err => console.error("Admin Notification Failed:", err));
 
     return res.status(201).json({
       message: 'Studio registered successfully',
@@ -126,6 +135,77 @@ export const login = async (req: Request, res: Response) => {
     });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
+  }
+};
+
+/**
+ * Google Login/Signup
+ */
+export const googleLogin = async (req: Request, res: Response) => {
+  const { credential } = req.body;
+  try {
+    const ticket = await googleClient.verifyIdToken({
+      idToken: credential,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+    const payload = ticket.getPayload();
+    if (!payload || !payload.email) {
+      return res.status(400).json({ error: 'Invalid Google token' });
+    }
+
+    const email = payload.email.toLowerCase();
+    const name = payload.name || 'User';
+
+    let user = await User.findOne({ email });
+
+    // If user doesn't exist, create them as STUDIO_OWNER (or just user)
+    // For our app, we usually need studio details for registration, but for Google Login we can
+    // just create the user, and if they don't have a studio, they can be prompted to create one later.
+    // Or we create a placeholder studio. We'll create a placeholder studio.
+    let isNewUser = false;
+    if (!user) {
+      isNewUser = true;
+      user = await User.create({
+        name,
+        email,
+        role: 'STUDIO_OWNER',
+        // Password is not needed for google auth, but we might want a placeholder or optional password
+      });
+    }
+
+    const tokens = generateTokens(user._id.toString(), user.role);
+    user.refreshToken = tokens.refreshToken;
+    await user.save();
+
+    let studio = null;
+    if (user.role === 'STUDIO_OWNER') {
+      studio = await Studio.findOne({ ownerId: user._id });
+      
+      // If new user, create a placeholder studio
+      if (!studio) {
+        const cleanSubdomain = name.toLowerCase().replace(/[^a-z0-9]/g, '') + '-' + Math.floor(Math.random() * 10000);
+        studio = await Studio.create({
+          name: name + "'s Studio",
+          subdomain: cleanSubdomain,
+          ownerId: user._id,
+          subscriptionPlan: 'BASIC',
+          subscriptionStatus: 'FREE',
+        });
+      }
+    }
+
+    if (isNewUser) {
+      sendWelcomeEmail(user.email, user.name, true).catch(err => console.error("Welcome Email Failed:", err));
+    }
+
+    return res.json({
+      user: { id: user._id, name: user.name, email: user.email, role: user.role },
+      studio: studio ? { id: studio._id, name: studio.name, subdomain: studio.subdomain } : null,
+      ...tokens,
+    });
+  } catch (err: any) {
+    console.error('Google Login Error:', err);
+    return res.status(500).json({ error: 'Failed to authenticate with Google' });
   }
 };
 
