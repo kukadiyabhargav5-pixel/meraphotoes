@@ -5,8 +5,8 @@ import { FaceEmbedding, Media, Studio } from '../models';
 const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://127.0.0.1:8000';
 
 // InsightFace (ArcFace buffalo_l) cosine similarity thresholds
-// Lowered to 0.45 to aggressively find matches in group photos, side-profiles, and varying lighting
-const SIMILARITY_THRESHOLD = 0.45; // Minimum to count as a match
+// Lowered to 0.05 (5%) to aggressively find matches even in crowd backgrounds as requested
+const SIMILARITY_THRESHOLD = 0.05; // Minimum to count as a match
 const HIGH_CONFIDENCE_THRESHOLD = 0.65; // High confidence match
 
 /**
@@ -178,5 +178,69 @@ export const searchBySelfie = async (req: Request, res: Response) => {
   } catch (err: any) {
     console.error('AI Face Search Error:', err);
     return res.status(500).json({ error: err.message });
+  }
+};
+
+// We don't need GoogleGenerativeAI anymore since we are using OpenRouter
+// import { GoogleGenerativeAI } from '@google/generative-ai';
+
+/**
+ * Handle AI Chatbot interactions using OpenRouter API.
+ */
+export const chatWithAI = async (req: Request, res: Response) => {
+  const { messages } = req.body;
+
+  try {
+    if (!messages || !Array.isArray(messages)) {
+      return res.status(400).json({ error: 'Messages array is required.' });
+    }
+
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    if (!apiKey) {
+      return res.json({ response: "**Server Error:** OpenRouter API Key is missing in .env." });
+    }
+
+    // Format messages for OpenRouter (role: 'system'|'user'|'assistant')
+    const formattedMessages = [
+      {
+        role: 'system',
+        content: `You are Mara AI, a highly intelligent and helpful assistant for Mara Photo - a professional event photo sharing platform.
+        CRITICAL RULE: You MUST always respond in the exact same language that the user is speaking. For example, if the user speaks in Gujarati, respond in Gujarati. If they speak in Hindi, respond in Hindi. If English, respond in English.
+        Your goal is to help studio owners manage their events, answer their questions about the platform, and provide a friendly, helpful experience.
+        Keep your answers concise, professional, and easy to read. Use formatting (bold, bullet points) where appropriate.`
+      },
+      ...messages.map((msg: any) => ({
+        role: msg.role === 'user' ? 'user' : 'assistant',
+        content: msg.content
+      }))
+    ];
+
+    const response = await axios.post(
+      'https://openrouter.ai/api/v1/chat/completions',
+      {
+        model: 'openai/gpt-4o-mini', // Using gpt-4o-mini for speed and cost-effectiveness (or gpt-4o if preferred)
+        messages: formattedMessages,
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'HTTP-Referer': 'http://localhost:3000',
+          'X-Title': 'Mara Photo Studio',
+          'Content-Type': 'application/json',
+        }
+      }
+    );
+
+    const responseText = response.data?.choices?.[0]?.message?.content;
+    if (!responseText) {
+      throw new Error("Invalid response format from OpenRouter");
+    }
+
+    return res.json({ response: responseText });
+  } catch (err: any) {
+    console.error('AI Chat Error (OpenRouter):', err?.response?.data || err.message);
+    return res.json({ 
+      response: "માફ કરજો, કંઈક ભૂલ થઈ છે. કૃપા કરીને થોડીવાર પછી ફરી પ્રયાસ કરો." 
+    });
   }
 };

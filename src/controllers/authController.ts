@@ -129,7 +129,7 @@ export const login = async (req: Request, res: Response) => {
     }
 
     return res.json({
-      user: { id: user._id, name: user.name, email: user.email, role: user.role },
+      user: { id: user._id, name: user.name, email: user.email, role: user.role, phone: user.phone },
       studio: studio ? { id: studio._id, name: studio.name, subdomain: studio.subdomain } : null,
       ...tokens,
     });
@@ -199,7 +199,7 @@ export const googleLogin = async (req: Request, res: Response) => {
     }
 
     return res.json({
-      user: { id: user._id, name: user.name, email: user.email, role: user.role },
+      user: { id: user._id, name: user.name, email: user.email, role: user.role, phone: user.phone },
       studio: studio ? { id: studio._id, name: studio.name, subdomain: studio.subdomain } : null,
       ...tokens,
     });
@@ -225,7 +225,7 @@ export const getMe = async (req: AuthRequest, res: Response) => {
     }
 
     return res.json({
-      user: { id: user._id, name: user.name, email: user.email, role: user.role },
+      user: { id: user._id, name: user.name, email: user.email, role: user.role, phone: user.phone },
       studio: studio ? { id: studio._id, name: studio.name, subdomain: studio.subdomain } : null,
     });
   } catch (err: any) {
@@ -317,7 +317,7 @@ export const verifyOTP = async (req: Request, res: Response) => {
     sendWelcomeEmail(user.email, user.name || 'Guest', false).catch(err => console.error("Welcome Email Failed:", err));
 
     return res.json({
-      user: { id: user._id, name: user.name, email: user.email, role: user.role },
+      user: { id: user._id, name: user.name, email: user.email, role: user.role, phone: user.phone },
       ...tokens,
     });
   } catch (err: any) {
