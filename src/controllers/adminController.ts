@@ -196,7 +196,7 @@ export const getAdminStats = async (req: Request, res: Response) => {
     
     // Calculate total revenue from all bills
     const bills = await Bill.find();
-    const totalRevenue = bills.reduce((acc, bill) => acc + (bill.totalAmount || 0), 0) || 0;
+    const totalRevenue = bills.reduce((acc, bill) => acc + (bill.amount || 0), 0) || 0;
 
     return res.json({
       totalUsers,
@@ -323,7 +323,7 @@ const deleteStudioInternal = async (studioId: string) => {
   // Find all events for this studio and delete them
   const events = await Event.find({ studioId });
   for (const event of events) {
-    await deleteEventInternal(event._id as string);
+    await deleteEventInternal(event._id.toString());
   }
   
   // Delete all other studio-related data
@@ -343,7 +343,7 @@ const deleteUserInternal = async (userId: string) => {
   // Find all studios owned by this user
   const studios = await Studio.find({ ownerId: userId });
   for (const studio of studios) {
-    await deleteStudioInternal(studio._id as string);
+    await deleteStudioInternal(studio._id.toString());
   }
   
   // Finally delete the user
