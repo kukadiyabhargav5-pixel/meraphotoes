@@ -13,6 +13,7 @@ import { EventCover } from '../models/EventCover';
 import { Event } from '../models/Event';
 import { Media } from '../models/Media';
 import { Studio } from '../models/Studio';
+import GalleryVisitor from '../models/GalleryVisitor';
 import { authenticateJWT, AuthRequest } from '../middlewares/auth';
 import { uploadFile } from '../services/StorageService';
 
@@ -77,15 +78,19 @@ router.get('/stats', async (req: AuthRequest, res) => {
     const studioId = studio._id;
 
     // Parallel count queries for performance
-    const [eventsCount, photosCount, customersCount] = await Promise.all([
+    const [eventsCount, mediaCount, visitorsCount, teamCount, customersCount] = await Promise.all([
       Event.countDocuments({ studioId }),
-      Media.countDocuments({ studioId, type: 'PHOTO' }),
-      Customer.countDocuments({}),
+      Media.countDocuments({ studioId }), // Count all media (photos and videos)
+      GalleryVisitor.countDocuments({ studioId }),
+      Team.countDocuments({ studioId }),
+      Customer.countDocuments({ studioId }), // Fixed to only count this studio's customers
     ]);
 
     return res.json({
       events: eventsCount,
-      photos: photosCount,
+      media: mediaCount,
+      visitors: visitorsCount,
+      teamMembers: teamCount,
       customers: customersCount,
       studioName: studio.name,
       subscriptionPlan: studio.subscriptionPlan,

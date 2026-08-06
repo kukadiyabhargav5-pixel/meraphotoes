@@ -5,8 +5,8 @@ import { FaceEmbedding, Media, Studio } from '../models';
 const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://127.0.0.1:8000';
 
 // InsightFace (ArcFace buffalo_l) cosine similarity thresholds
-// Lowered to 0.05 (5%) to aggressively find matches even in crowd backgrounds as requested
-const SIMILARITY_THRESHOLD = 0.05; // Minimum to count as a match
+// Set to 0.40 for strict, highly accurate "microscan" matching
+const SIMILARITY_THRESHOLD = 0.40; // Minimum to count as a match
 const HIGH_CONFIDENCE_THRESHOLD = 0.65; // High confidence match
 
 /**

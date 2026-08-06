@@ -54,7 +54,7 @@ export const createEvent = async (req: AuthRequest, res: Response) => {
     }
 
     let passwordHash = undefined;
-    if (accessType === 'PASSWORD' && password) {
+    if ((accessType === 'PASSWORD' || accessType === 'OTP') && password) {
       const salt = await bcrypt.genSalt(10);
       passwordHash = await bcrypt.hash(password, salt);
     }
@@ -116,12 +116,6 @@ export const createEvent = async (req: AuthRequest, res: Response) => {
     } catch (custErr) {
       console.error('Error syncing customer:', custErr);
     }
-
-    // Notify Admin
-    sendAdminNotificationEmail(
-      `New Event Created: ${newEvent.name}`, 
-      `<p>A new event has been created on Mara Photo.</p><p>Event Name: ${newEvent.name}</p><p>Client: ${newEvent.clientName}</p><p>Studio ID: ${studio._id}</p>`
-    ).catch(err => console.error("Admin Notification Failed:", err));
 
     // Send email to the studio owner (logged in user) about the event creation
     if (req.user && req.user.email) {
@@ -318,10 +312,10 @@ export const updateEvent = async (req: AuthRequest, res: Response) => {
 
     if (accessType) {
       event.accessType = accessType;
-      if (accessType === 'PASSWORD' && password) {
+      if ((accessType === 'PASSWORD' || accessType === 'OTP') && password) {
         const salt = await bcrypt.genSalt(10);
         event.passwordHash = await bcrypt.hash(password, salt);
-      } else if (accessType !== 'PASSWORD') {
+      } else if (accessType !== 'PASSWORD' && accessType !== 'OTP') {
         event.passwordHash = undefined;
       }
     }

@@ -324,21 +324,26 @@ export const uploadAsset = async (req: AuthRequest, res: Response) => {
 };
 
 /**
- * Generate a Cloudinary signature for client-side uploads
+ * Generate ImageKit authentication parameters for client-side uploads
  */
-export const getCloudinarySignature = async (req: AuthRequest, res: Response) => {
+export const getImageKitAuth = async (req: AuthRequest, res: Response) => {
   try {
     if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
-    const { folder } = req.query;
-    
-    if (!folder || typeof folder !== 'string') {
-      return res.status(400).json({ error: 'Folder query parameter is required' });
-    }
 
-    const signatureData = generateSignature(folder);
-    return res.json(signatureData);
+    const count = parseInt(req.query.count as string) || 1;
+    
+    if (count > 1) {
+      const signatures = [];
+      for (let i = 0; i < count; i++) {
+        signatures.push(generateSignature());
+      }
+      return res.json({ signatures });
+    } else {
+      const signatureData = generateSignature();
+      return res.json(signatureData);
+    }
   } catch (err: any) {
-    console.error('Signature Error:', err);
+    console.error('ImageKit Auth Error:', err);
     return res.status(500).json({ error: err.message });
   }
 };

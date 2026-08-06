@@ -26,6 +26,8 @@ export interface IStudio extends Document {
   logoUrl?: string;
   subdomain: string; // unique subdomain, e.g. "dreamstudio"
   customDomain?: string; // e.g. "gallery.dreamstudio.com"
+  instagramUrl?: string;
+  facebookUrl?: string;
   ownerId: mongoose.Types.ObjectId;
   watermark: IWatermarkSettings;
   subscriptionPlan: 'BASIC' | 'STANDARD' | 'ESSENTIAL' | 'PREMIUM' | 'STARTER' | 'PROFESSIONAL' | 'BUSINESS' | 'ENTERPRISE';
@@ -42,6 +44,8 @@ const StudioSchema = new Schema<IStudio>({
   logoUrl: { type: String },
   subdomain: { type: String, required: true, unique: true, index: true, lowercase: true, trim: true },
   customDomain: { type: String, unique: true, sparse: true, lowercase: true, trim: true },
+  instagramUrl: { type: String },
+  facebookUrl: { type: String },
   ownerId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
   watermark: {
     type: { type: String, enum: ['TEXT', 'LOGO', 'NONE'], default: 'NONE' },
