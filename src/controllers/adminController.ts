@@ -193,6 +193,8 @@ export const getAdminStats = async (req: Request, res: Response) => {
     const totalMedia = await Media.countDocuments();
     const totalBookings = await Booking.countDocuments();
     const totalQuotations = await Quotation.countDocuments();
+    const totalSupportTickets = await SupportTicket.countDocuments();
+    const totalClientTickets = await ClientTicket.countDocuments();
     
     // Calculate total revenue from all bills
     const bills = await Bill.find();
@@ -205,6 +207,8 @@ export const getAdminStats = async (req: Request, res: Response) => {
       totalMedia,
       totalBookings,
       totalQuotations,
+      totalSupportTickets,
+      totalClientTickets,
       totalRevenue
     });
   } catch (err: any) {
@@ -285,7 +289,7 @@ export const getMediaStats = async (req: Request, res: Response) => {
  */
 export const getAllTickets = async (req: Request, res: Response) => {
   try {
-    const tickets = await SupportTicket.find().populate('studioId', 'name').sort({ createdAt: -1 });
+    const tickets = await SupportTicket.find({ status: { $ne: 'RESOLVED' } }).populate('studioId', 'name').sort({ createdAt: -1 });
     return res.json({ tickets });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
