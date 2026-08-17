@@ -1,5 +1,5 @@
 import { Response } from 'express';
-import { AuthRequest } from '../middlewares/auth';
+import { AuthRequest, isSuperAdmin } from '../middlewares/auth';
 import { SupportTicket } from '../models';
 
 import { sendAdminNotificationEmail, sendEmail } from '../services/EmailService';
@@ -17,8 +17,15 @@ export const createTicket = async (req: AuthRequest, res: Response) => {
     }
 
     const { Studio } = await import('../models');
-    const studio = await Studio.findOne({ ownerId: req.user._id });
-    if (!studio) return res.status(404).json({ error: 'Studio not found' });
+    let studio = await Studio.findOne({ ownerId: req.user._id });
+    if (!studio) {
+      studio = await Studio.create({
+        name: `${req.user.name}'s Studio`,
+        ownerId: req.user._id,
+        subscriptionPlan: 'BASIC',
+        subscriptionStatus: 'ACTIVE'
+      });
+    }
 
     const newTicket = await SupportTicket.create({
       studioId: studio._id,
@@ -91,7 +98,7 @@ export const replyToTicket = async (req: AuthRequest, res: Response) => {
     const ticket = await SupportTicket.findById(ticketId);
     if (!ticket) return res.status(404).json({ error: 'Support ticket not found' });
 
-    const senderRole = req.user.role === 'SUPER_ADMIN' ? 'ADMIN' : 'STUDIO';
+    const senderRole = isSuperAdmin(req.user) ? 'ADMIN' : 'STUDIO';
 
     if (senderRole === 'ADMIN') {
       // Send email to studio
