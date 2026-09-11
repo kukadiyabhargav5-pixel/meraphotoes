@@ -17,28 +17,29 @@ export const calculateStudioCredits = async (studioId: any, plan: string, cached
   const planKey = (plan || 'BASIC').toUpperCase();
   const limits = PLAN_STORAGE_LIMITS[planKey] || PLAN_STORAGE_LIMITS.BASIC;
 
-  const [studio, [activePhotos, activeVideos]] = await Promise.all([
+  const [studio, [creditedPhotos, creditedVideos, pendingPhotos, pendingVideos]] = await Promise.all([
     cachedStudio ? Promise.resolve(cachedStudio) : Studio.findById(studioId).select('usage').lean(),
     Promise.all([
-      Media.countDocuments({ studioId, type: 'PHOTO' }),
-      Media.countDocuments({ studioId, type: 'VIDEO' })
+      Media.countDocuments({ studioId, type: 'PHOTO', creditDeducted: true }),
+      Media.countDocuments({ studioId, type: 'VIDEO', creditDeducted: true }),
+      Media.countDocuments({ studioId, type: 'PHOTO', creditDeducted: false }),
+      Media.countDocuments({ studioId, type: 'VIDEO', creditDeducted: false })
     ])
   ]);
 
   // Consumed quota:
-  // Uploads deduct quota permanently.
-  // Deleting media does NOT restore credits!
+  // Uploads deduct quota permanently once event is saved.
   let consumedPhotos = studio?.usage?.photosUploaded ?? 0;
   let consumedVideos = studio?.usage?.videosUploaded ?? 0;
 
-  // Initialize if never tracked or if behind active media count
-  if (consumedPhotos < activePhotos) {
-    consumedPhotos = activePhotos;
-    await Studio.findByIdAndUpdate(studioId, { $set: { 'usage.photosUploaded': activePhotos } });
+  // Initialize if never tracked or if behind credited media count
+  if (consumedPhotos < creditedPhotos) {
+    consumedPhotos = creditedPhotos;
+    await Studio.findByIdAndUpdate(studioId, { $set: { 'usage.photosUploaded': creditedPhotos } });
   }
-  if (consumedVideos < activeVideos) {
-    consumedVideos = activeVideos;
-    await Studio.findByIdAndUpdate(studioId, { $set: { 'usage.videosUploaded': activeVideos } });
+  if (consumedVideos < creditedVideos) {
+    consumedVideos = creditedVideos;
+    await Studio.findByIdAndUpdate(studioId, { $set: { 'usage.videosUploaded': creditedVideos } });
   }
 
   const totalPhotosUsed = consumedPhotos;
@@ -54,6 +55,8 @@ export const calculateStudioCredits = async (studioId: any, plan: string, cached
       totalLimit: limits.photos,
       used: totalPhotosUsed,
       remaining: Math.max(0, limits.photos - totalPhotosUsed),
+      pendingSave: pendingPhotos,
+      projectedRemaining: Math.max(0, limits.photos - totalPhotosUsed - pendingPhotos),
       percentUsed: Number(photoPercent.toFixed(2)),
       rawPercent: photoPercent
     },
@@ -61,6 +64,8 @@ export const calculateStudioCredits = async (studioId: any, plan: string, cached
       totalLimit: limits.videos,
       used: totalVideosUsed,
       remaining: Math.max(0, limits.videos - totalVideosUsed),
+      pendingSave: pendingVideos,
+      projectedRemaining: Math.max(0, limits.videos - totalVideosUsed - pendingVideos),
       percentUsed: Number(videoPercent.toFixed(2)),
       rawPercent: videoPercent
     }

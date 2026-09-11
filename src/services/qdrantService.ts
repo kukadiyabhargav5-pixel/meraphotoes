@@ -88,7 +88,7 @@ export const insertFaceEmbedding = async (
 export const searchFaces = async (
   eventId: string,
   queryEmbedding: number[],
-  limit: number = 20,
+  limit: number = 10000, // No arbitrary cap — search entire indexed gallery
   minScore: number = 0.5
 ) => {
   try {
@@ -119,7 +119,7 @@ export const searchFaces = async (
 export const localCosineSearch = async (
   eventId: string,
   queryEmbedding: number[],
-  limit: number = 20,
+  limit: number = 10000, // No arbitrary cap — search entire indexed gallery
   minScore: number = 0.5
 ) => {
   const { FaceEmbedding } = await import('../models');

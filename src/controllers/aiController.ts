@@ -32,8 +32,9 @@ const cosineSimilarity = (vecA: number[], vecB: number[]): number => {
  * Flow:
  *   1. Send selfie to AI service → get face embedding(s)
  *   2. Fetch all face embeddings for the event from DB
- *   3. Compare using cosine similarity
+ *   3. Compare using cosine similarity (no arbitrary limit)
  *   4. Return matched media sorted by similarity score
+ *   5. Include indexing status for transparency
  */
 export const searchBySelfie = async (req: Request, res: Response) => {
   const { eventId } = req.params;
@@ -53,7 +54,7 @@ export const searchBySelfie = async (req: Request, res: Response) => {
 
       const aiResponse = await axios.post(`${AI_SERVICE_URL}/detect-faces`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
-        timeout: 30000, // 30 second timeout for AI processing
+        timeout: 30000,
       });
 
       faces = aiResponse.data.faces || [];
@@ -79,7 +80,7 @@ export const searchBySelfie = async (req: Request, res: Response) => {
     // Use the first (usually largest/most prominent) detected face
     const queryEmbedding = faces[0].embedding;
 
-    // 2. Fetch all face embeddings for this event
+    // 2. Fetch ALL face embeddings for this event (no limit)
     const eventEmbeddings = await FaceEmbedding.find({ eventId });
 
     if (eventEmbeddings.length === 0) {
@@ -89,7 +90,7 @@ export const searchBySelfie = async (req: Request, res: Response) => {
       });
     }
 
-    // 3. Compute similarities against all stored embeddings
+    // 3. Compute similarities against ALL stored embeddings (no arbitrary limit)
     const matches: { mediaId: string; timestamp?: number; similarity: number }[] = [];
     
     for (const item of eventEmbeddings) {
@@ -124,23 +125,20 @@ export const searchBySelfie = async (req: Request, res: Response) => {
       const group = mediaGroups[match.mediaId];
       group.matchCount++;
       
-      // Track highest similarity for this media item
       if (match.similarity > group.bestSimilarity) {
         group.bestSimilarity = match.similarity;
       }
       
-      // Track video timestamps
       if (match.timestamp !== undefined) {
         group.timestamps.push(match.timestamp);
       }
     }
 
-    // Sort timestamps for video matches
     for (const mId in mediaGroups) {
       mediaGroups[mId].timestamps.sort((a, b) => a - b);
     }
 
-    // 5. Populate Media details
+    // 5. Populate Media details — ALL matches, no limit
     const matchedMediaIds = Object.keys(mediaGroups);
     const mediaDetails = await Media.find({ _id: { $in: matchedMediaIds } });
 
@@ -151,13 +149,12 @@ export const searchBySelfie = async (req: Request, res: Response) => {
         ...media.toObject(),
         similarity: parseFloat(group.bestSimilarity.toFixed(4)),
         similarityPercent,
-        confidence: group.bestSimilarity >= HIGH_CONFIDENCE_THRESHOLD ? 'HIGH' : 'MEDIUM',
+        confidence: group.bestSimilarity >= HIGH_CONFIDENCE_THRESHOLD ? 'HIGH' : group.bestSimilarity >= 0.50 ? 'MEDIUM' : 'LOW',
         matchCount: group.matchCount,
         timestamps: group.timestamps,
       };
     });
 
-    // Sort by similarity score (highest first)
     results.sort((a, b) => b.similarity - a.similarity);
 
     // Increment AI search usage
@@ -166,14 +163,24 @@ export const searchBySelfie = async (req: Request, res: Response) => {
       await Studio.findByIdAndUpdate(firstMedia.studioId, { $inc: { 'usage.aiSearchesCount': 1 } });
     }
 
+    // 6. Get indexing status
+    const totalMedia = await Media.countDocuments({ eventId, type: 'PHOTO' });
+    const pendingMedia = await Media.countDocuments({
+      eventId, type: 'PHOTO',
+      faceIndexStatus: { $in: ['PENDING', null] },
+    });
+
     console.log(`[AI Search] Found ${results.length} matching media items for event ${eventId}`);
 
     return res.json({ 
       matches: results,
       totalSearched: eventEmbeddings.length,
+      indexingStatus: { total: totalMedia, pending: pendingMedia },
       message: results.length > 0 
         ? `Found ${results.length} photo(s)/video(s) matching your face!`
-        : 'No matching photos found. The event photos may not have been processed yet.',
+        : pendingMedia > 0
+          ? `No matching photos found. ${pendingMedia} photos are still being indexed.`
+          : 'No matching photos found.',
     });
   } catch (err: any) {
     console.error('AI Face Search Error:', err);
