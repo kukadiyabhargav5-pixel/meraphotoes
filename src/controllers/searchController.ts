@@ -50,7 +50,7 @@ const triggerAutoIndexing = async (eventId: string) => {
     const pendingPhotos = await Media.find({
       eventId,
       type: 'PHOTO',
-      faceIndexStatus: { $in: ['PENDING', null] },
+      faceIndexStatus: { $in: ['PENDING', null, 'FAILED'] },
     }).select('_id compressedUrl r2Url url studioId eventId').lean();
 
     if (pendingPhotos.length === 0) {
@@ -189,7 +189,7 @@ export const faceSearch = async (req: Request, res: Response): Promise<void> => 
     const pendingCount = await Media.countDocuments({
       eventId,
       type: 'PHOTO',
-      faceIndexStatus: { $in: ['PENDING', null] },
+      faceIndexStatus: { $in: ['PENDING', null, 'FAILED'] },
     });
     if (pendingCount > 0) {
       triggerAutoIndexing(eventId.toString());
