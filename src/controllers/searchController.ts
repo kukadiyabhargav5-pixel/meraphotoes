@@ -29,7 +29,7 @@ const extractEmbeddingsFromFile = async (file: Express.Multer.File): Promise<any
   formData.append('file', file.buffer, file.originalname || 'selfie.jpg');
 
   const aiResponse = await axios.post(`${AI_SERVICE_URL}/detect-faces`, formData, {
-    headers: { ...formData.getHeaders() },
+    headers: { ...formData.getHeaders(), 'bypass-tunnel-reminder': 'true' },
     timeout: 30000,
   });
 
@@ -75,7 +75,7 @@ const triggerAutoIndexing = async (eventId: string) => {
         formData.append('file', buffer, 'photo.jpg');
 
         const aiRes = await axios.post(`${AI_SERVICE_URL}/detect-faces`, formData, {
-          headers: { ...formData.getHeaders() },
+          headers: { ...formData.getHeaders(), 'bypass-tunnel-reminder': 'true' },
           timeout: 60000,
         });
 
@@ -157,9 +157,18 @@ export const faceSearch = async (req: Request, res: Response): Promise<void> => 
         }
       } catch (aiErr: any) {
         console.error('[Face Search] AI service error for frame:', aiErr.message);
-        if (aiErr.code === 'ECONNREFUSED') {
+        const isOffline =
+          aiErr.code === 'ECONNREFUSED' ||
+          aiErr.cause?.code === 'ECONNREFUSED' ||
+          aiErr.message?.includes('ECONNREFUSED') ||
+          aiErr.message?.includes('ENOTFOUND') ||
+          aiErr.message?.includes('connect') ||
+          aiErr.code === 'ECONNABORTED' ||
+          !aiErr.response;
+
+        if (isOffline) {
           res.status(503).json({
-            error: 'AI Face Detection service is not running. Please start the AI service.',
+            error: 'AI Face Search service is currently offline or unreachable. Please verify the AI service status.',
           });
           return;
         }
