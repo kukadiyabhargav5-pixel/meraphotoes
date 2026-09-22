@@ -20,11 +20,17 @@ class FaceEngine:
     def __init__(self):
         self.ready = False
         if HAS_INSIGHTFACE:
-            print("[FaceEngine] Initializing InsightFace buffalo_l model...")
+            model_name = os.environ.get('INSIGHTFACE_MODEL', 'buffalo_sc')
+            print(f"[FaceEngine] Initializing InsightFace {model_name} model...")
             try:
-                # Initialize the FaceAnalysis app with buffalo_l (SCRFD-10G + ArcFace ResNet50)
-                self.app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider'])
-                self.app.prepare(ctx_id=0, det_size=(1280, 1280))
+                # Initialize the FaceAnalysis app with buffalo_sc (SCRFD-500M + MobileFaceNet)
+                # Only load detection and recognition modules (skipping genderage/landmarks saves ~250MB RAM!)
+                self.app = FaceAnalysis(
+                    name=model_name,
+                    allowed_modules=['detection', 'recognition'],
+                    providers=['CPUExecutionProvider']
+                )
+                self.app.prepare(ctx_id=-1, det_size=(640, 640))
                 
                 # Set sensitive detection threshold (0.35 instead of rigid 0.50)
                 det_model = self.app.models.get('detection')
@@ -32,7 +38,7 @@ class FaceEngine:
                     det_model.det_thresh = 0.35
 
                 self.ready = True
-                print("[FaceEngine] [OK] InsightFace model loaded successfully with high-sensitivity detection.")
+                print(f"[FaceEngine] [OK] InsightFace {model_name} loaded successfully with high-sensitivity detection.")
             except Exception as e:
                 print(f"[FaceEngine] [FAIL] Failed to load InsightFace model: {e}")
                 traceback.print_exc()
@@ -69,8 +75,8 @@ class FaceEngine:
     def _detect_faces_adaptive(self, img: np.ndarray) -> tuple[list, np.ndarray]:
         """
         Multi-pass adaptive detection to guarantee maximum face recall:
-        - Pass 1: Standard (1280x1280) with det_thresh=0.35
-        - Pass 2: Scale fallback (640x640) with det_thresh=0.30 (optimal for selfies / webcam)
+        - Pass 1: Standard (640x640) with det_thresh=0.35
+        - Pass 2: Scale fallback (480x480) with det_thresh=0.30 (optimal for selfies / webcam)
         - Pass 3: CLAHE contrast boost for underexposed or backlit photos
         - Pass 4: Auto-rotation check (90° CW, 90° CCW, 180°) for stripped-EXIF photos
         Returns (faces, active_image)
@@ -80,7 +86,7 @@ class FaceEngine:
         # Pass 1: Standard multi-scale detection
         if det_model:
             det_model.det_thresh = 0.35
-            det_model.det_size = (1280, 1280)
+            det_model.det_size = (640, 640)
         faces = self.app.get(img)
         if len(faces) > 0:
             return faces, img
@@ -88,10 +94,10 @@ class FaceEngine:
         # Pass 2: Fallback for close-up selfies / webcam crops
         if det_model:
             det_model.det_thresh = 0.30
-            det_model.det_size = (640, 640)
+            det_model.det_size = (480, 480)
         faces = self.app.get(img)
         if len(faces) > 0:
-            print("[FaceEngine] Faces detected via Pass 2 (640x640 scale fallback).")
+            print("[FaceEngine] Faces detected via Pass 2 (480x480 scale fallback).")
             return faces, img
 
         # Pass 3: Contrast enhancement for low-light or backlit selfies
@@ -116,7 +122,7 @@ class FaceEngine:
         # Reset det_size to default
         if det_model:
             det_model.det_thresh = 0.35
-            det_model.det_size = (1280, 1280)
+            det_model.det_size = (640, 640)
 
         return [], img
 
