@@ -376,10 +376,12 @@ export const cancelMySubscription = async (req: AuthRequest, res: Response) => {
 
     studio.subscriptionPlan = 'BASIC';
     studio.subscriptionStatus = 'ACTIVE';
+    studio.subscriptionStartDate = new Date();
+    studio.subscriptionExpiresAt = undefined;
     studio.razorpaySubscriptionId = undefined;
     await studio.save();
 
-    return res.json({ message: 'Subscription cancelled successfully', subscriptionStatus: 'CANCELLED' });
+    return res.json({ message: 'Subscription cancelled successfully. Downgraded to Basic Free plan.', subscriptionStatus: 'CANCELLED', studio });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }
@@ -430,10 +432,12 @@ export const verifyCancelOTP = async (req: AuthRequest, res: Response) => {
 
     studio.subscriptionPlan = 'BASIC';
     studio.subscriptionStatus = 'ACTIVE';
+    studio.subscriptionStartDate = new Date();
+    studio.subscriptionExpiresAt = undefined;
     studio.razorpaySubscriptionId = undefined;
     await studio.save();
 
-    return res.json({ message: 'Subscription cancelled successfully', subscriptionStatus: 'CANCELLED' });
+    return res.json({ message: 'Subscription cancelled successfully. Downgraded to Basic Free plan.', subscriptionStatus: 'CANCELLED', studio });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }

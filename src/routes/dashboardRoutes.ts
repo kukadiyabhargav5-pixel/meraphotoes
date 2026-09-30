@@ -71,7 +71,7 @@ router.get('/stats', async (req: AuthRequest, res) => {
 
     const adminUser = isSuperAdmin(req.user);
     // Find the studio for this user with lean projection
-    let studio: any = await Studio.findOne({ ownerId: userId }).select('name subscriptionPlan _id').lean();
+    let studio: any = await Studio.findOne({ ownerId: userId }).select('name subscriptionPlan subscriptionStartDate subscriptionExpiresAt subscriptionStatus _id').lean();
     if (!studio && adminUser) {
       const created = await Studio.create({
         name: 'Super Admin Studio',

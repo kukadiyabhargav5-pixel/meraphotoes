@@ -57,7 +57,9 @@ export const calculateStudioCredits = async (studioId: any, plan: string, cached
     await Studio.findByIdAndUpdate(studioId, {
       $set: {
         subscriptionPlan: 'BASIC',
-        subscriptionStatus: 'EXPIRED'
+        subscriptionStatus: 'ACTIVE',
+        subscriptionStartDate: new Date(),
+        subscriptionExpiresAt: null
       }
     });
   }
@@ -136,6 +138,7 @@ export const getMyStudio = async (req: AuthRequest, res: Response) => {
         ownerId: req.user._id,
         subscriptionPlan: 'BASIC',
         subscriptionStatus: 'ACTIVE',
+        subscriptionStartDate: new Date(),
       });
     } else {
       // Check if user is STUDIO_OWNER in DB
