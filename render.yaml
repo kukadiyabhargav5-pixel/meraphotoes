@@ -6,8 +6,8 @@ services:
     region: oregon
     repo: https://github.com/kukadiyabhargav5-pixel/meraphotoes.git
     branch: main
-    buildCommand: npm install && npm run build
-    startCommand: npm start
+    buildCommand: cd backend && npm install && npm run build
+    startCommand: cd backend && npm start
     autoDeploy: true
     healthCheckPath: /health
     envVars:
@@ -54,19 +54,19 @@ services:
       - key: OPENROUTER_API_KEY
         sync: false
       - key: AI_SERVICE_URL
-        sync: false
+        value: http://maraphotoes-ai:10000
       - key: FRONTEND_URL
-        sync: false
+        value: https://meraphoto.vercel.app
 
   - type: web
-    name: meraphoto-ai
+    name: maraphotoes-ai
     runtime: python
     plan: free
     region: oregon
     repo: https://github.com/kukadiyabhargav5-pixel/meraphotoes.git
     branch: main
     rootDir: ai-service
-    buildCommand: pip install --upgrade pip && pip install -r requirements.txt && python -c "from insightface.app import FaceAnalysis; app = FaceAnalysis(name='buffalo_sc', allowed_modules=['detection', 'recognition']); app.prepare(ctx_id=-1, det_size=(640, 640))"
+    buildCommand: pip install --upgrade pip && pip install --prefer-binary -r requirements.txt && python -c "from insightface.app import FaceAnalysis; app = FaceAnalysis(name='buffalo_sc', allowed_modules=['detection', 'recognition']); app.prepare(ctx_id=-1, det_size=(640, 640))"
     startCommand: python app/main.py
     autoDeploy: true
     healthCheckPath: /health
@@ -75,3 +75,5 @@ services:
         value: 3.11.9
       - key: INSIGHTFACE_MODEL
         value: buffalo_sc
+      - key: PORT
+        value: 10000

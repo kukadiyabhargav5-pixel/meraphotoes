@@ -1,13 +1,25 @@
 import { Request, Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
+import path from 'path';
+import { GetObjectCommand } from '@aws-sdk/client-s3';
 import { AuthRequest, isSuperAdmin } from '../middlewares/auth';
 import { Media, Event, Studio, FaceEmbedding } from '../models';
-import { uploadFile, deleteFile, generateSignature } from '../services/StorageService';
+import {
+  r2Client,
+  R2_BUCKET,
+  uploadFile,
+  deleteFile,
+  deleteFiles,
+  generatePresignedUploadUrl,
+  generatePresignedDownloadUrl,
+  getFileUrl,
+  generateSignature,
+} from '../services/StorageService';
 import { photoQueue, videoQueue, processMediaLocal, isRedisAvailable } from '../workers/mediaWorker';
 import sharp from 'sharp';
 
 /**
- * Handle bulk photo and video uploads
+ * Handle bulk photo and video uploads (Backend route)
  */
 export const uploadMedia = async (req: AuthRequest, res: Response) => {
   const { eventId } = req.params;
@@ -37,65 +49,65 @@ export const uploadMedia = async (req: AuthRequest, res: Response) => {
     const uploadFn = async (file: Express.Multer.File, i: number) => {
       try {
         const folderPath = folderPathsArr[i] || '';
-        const isVideo = file.mimetype.startsWith('video/');
+        const isVideo = file.mimetype.startsWith('video/') || /\.(mp4|mov|avi|mkv|webm|m4v|3gp)$/i.test(file.originalname);
         const type = isVideo ? 'VIDEO' : 'PHOTO';
-        
+
         // Enforce limits based on plan (Bypass for SUPER_ADMIN)
         if (!isSuperAdmin(req.user)) {
+          const planKey = (studio.subscriptionPlan || 'BASIC').toUpperCase();
           if (type === 'VIDEO') {
-            if (studio.subscriptionPlan === 'BASIC' && (studio.usage.videosUploaded || 0) >= 10) {
-              throw new Error('Basic plan video limit reached (Max 10 videos). Please upgrade.');
-            } else if (studio.subscriptionPlan === 'STANDARD' && (studio.usage.videosUploaded || 0) >= 100) {
-              throw new Error('Standard plan video limit reached (Max 100 videos). Please upgrade.');
-            } else if (studio.subscriptionPlan === 'ESSENTIAL' && (studio.usage.videosUploaded || 0) >= 200) {
-              throw new Error('Essential plan video limit reached (Max 200 videos). Please upgrade.');
-            } else if (studio.subscriptionPlan === 'PREMIUM' && (studio.usage.videosUploaded || 0) >= 500) {
-              throw new Error('Premium plan video limit reached (Max 500 videos). Please upgrade.');
+            if (planKey === 'BASIC' && (studio.usage.videosUploaded || 0) >= 0) {
+              throw new Error('Basic free plan does not include video uploads. Please upgrade.');
+            } else if ((planKey === 'STARTUP' || planKey === 'STARTER') && (studio.usage.videosUploaded || 0) >= 10) {
+              throw new Error('Startup plan video limit reached (Max 10 videos). Please upgrade.');
+            } else if (planKey === 'STANDARD' && (studio.usage.videosUploaded || 0) >= 20) {
+              throw new Error('Standard plan video limit reached (Max 20 videos). Please upgrade.');
+            } else if (planKey === 'ESSENTIAL' && (studio.usage.videosUploaded || 0) >= 50) {
+              throw new Error('Essential plan video limit reached (Max 50 videos). Please upgrade.');
+            } else if ((planKey === 'PREMIUM' || planKey === 'ENTERPRISE') && (studio.usage.videosUploaded || 0) >= 100) {
+              throw new Error('Premium plan video limit reached (Max 100 videos). Please upgrade.');
             }
           } else if (type === 'PHOTO') {
-            if (studio.subscriptionPlan === 'BASIC' && (studio.usage.photosUploaded || 0) >= 50000) {
-              throw new Error('Basic plan photo limit reached (Max 50,000 photos). Please upgrade.');
-            } else if (studio.subscriptionPlan === 'STANDARD' && (studio.usage.photosUploaded || 0) >= 150000) {
-              throw new Error('Standard plan photo limit reached (Max 150,000 photos). Please upgrade.');
-            } else if (studio.subscriptionPlan === 'ESSENTIAL' && (studio.usage.photosUploaded || 0) >= 300000) {
-              throw new Error('Essential plan photo limit reached (Max 300,000 photos). Please upgrade.');
-            } else if (studio.subscriptionPlan === 'PREMIUM' && (studio.usage.photosUploaded || 0) >= 750000) {
-              throw new Error('Premium plan photo limit reached (Max 750,000 photos). Please upgrade.');
+            if (planKey === 'BASIC' && (studio.usage.photosUploaded || 0) >= 0) {
+              throw new Error('Basic free plan does not include photo uploads. Please upgrade.');
+            } else if ((planKey === 'STARTUP' || planKey === 'STARTER') && (studio.usage.photosUploaded || 0) >= 50000) {
+              throw new Error('Startup plan photo limit reached (Max 50,000 photos). Please upgrade.');
+            } else if (planKey === 'STANDARD' && (studio.usage.photosUploaded || 0) >= 100000) {
+              throw new Error('Standard plan photo limit reached (Max 100,000 photos). Please upgrade.');
+            } else if (planKey === 'ESSENTIAL' && (studio.usage.photosUploaded || 0) >= 150000) {
+              throw new Error('Essential plan photo limit reached (Max 150,000 photos). Please upgrade.');
+            } else if ((planKey === 'PREMIUM' || planKey === 'ENTERPRISE') && (studio.usage.photosUploaded || 0) >= 300000) {
+              throw new Error('Premium plan photo limit reached (Max 300,000 photos). Please upgrade.');
             }
           }
         }
 
-        // Compress large images before uploading to stay under Cloudinary 10MB free tier limit
         let finalBuffer = file.buffer;
         let finalSize = file.size;
 
         if (type === 'PHOTO') {
-          // Strict Maximum 2MB compression for photos
-          const TWO_MB = 2 * 1024 * 1024;
-          finalBuffer = await sharp(file.buffer)
-            .resize({ width: 2560, height: 2560, fit: 'inside', withoutEnlargement: true })
-            .jpeg({ quality: 85, mozjpeg: true })
-            .withMetadata() // Preserve EXIF data (orientation, etc)
-            .toBuffer();
-
-          if (finalBuffer.length > TWO_MB) {
+          try {
+            // High-speed single pass optimization: preserve orientation & max 3840px
             finalBuffer = await sharp(file.buffer)
-              .resize({ width: 2048, height: 2048, fit: 'inside', withoutEnlargement: true })
-              .jpeg({ quality: 75, mozjpeg: true })
+              .rotate()
+              .resize({ width: 3840, height: 3840, fit: 'inside', withoutEnlargement: true })
+              .jpeg({ quality: 88, mozjpeg: true })
               .toBuffer();
+            finalSize = finalBuffer.length;
+          } catch {
+            finalBuffer = file.buffer;
+            finalSize = file.size;
           }
-          if (finalBuffer.length > TWO_MB) {
-            finalBuffer = await sharp(file.buffer)
-              .resize({ width: 1920, height: 1920, fit: 'inside', withoutEnlargement: true })
-              .jpeg({ quality: 65, mozjpeg: true })
-              .toBuffer();
-          }
-          finalSize = finalBuffer.length;
         }
 
-        // Upload optimized file buffer to Cloudinary
-        const folderPathForCloudinary = `events/${eventId}/${type.toLowerCase()}s`;
-        const { url: r2Url, publicId: r2Key } = await uploadFile(finalBuffer, folderPathForCloudinary);
+        // Upload buffer directly to Cloudflare R2
+        const folderPathForR2 = `events/${eventId}/${type.toLowerCase()}s`;
+        const { url: r2Url, publicId: r2Key } = await uploadFile(
+          finalBuffer,
+          folderPathForR2,
+          file.mimetype || (type === 'PHOTO' ? 'image/jpeg' : 'video/mp4'),
+          file.originalname
+        );
 
         // Save media record as PENDING
         const media = await Media.create({
@@ -108,10 +120,10 @@ export const uploadMedia = async (req: AuthRequest, res: Response) => {
           size: finalSize,
           uploadedBy: req.user?._id,
           processedStatus: 'PENDING',
-          creditDeducted: false, // Deducted upon saving event
+          creditDeducted: false,
         });
 
-        // Enqueue job or process synchronously
+        // Enqueue job or queue for synchronous processing
         if (isRedisAvailable && photoQueue && videoQueue) {
           try {
             if (type === 'PHOTO') {
@@ -123,7 +135,6 @@ export const uploadMedia = async (req: AuthRequest, res: Response) => {
             offlineQueue.push({ id: media._id.toString(), type, studioId: event.studioId.toString() });
           }
         } else {
-          // Redis offline – add to batch queue
           offlineQueue.push({ id: media._id.toString(), type, studioId: event.studioId.toString() });
         }
 
@@ -134,8 +145,8 @@ export const uploadMedia = async (req: AuthRequest, res: Response) => {
       }
     };
 
-    // Process uploads with concurrency limit to avoid overwhelming Cloudinary / hitting timeouts
-    const concurrencyLimit = 8;
+    // Process uploads with concurrency limit of 10 for maximum throughput
+    const concurrencyLimit = 10;
     const results: any[] = [];
     for (let i = 0; i < files.length; i += concurrencyLimit) {
       const chunk = files.slice(i, i + concurrencyLimit);
@@ -144,23 +155,24 @@ export const uploadMedia = async (req: AuthRequest, res: Response) => {
         results.push(...chunkResults);
       } catch (err: any) {
         console.error('[uploadMedia] Chunk error:', err);
-        if (err?.message?.includes('Starter plan')) {
-          return res.status(403).json({ error: err.message });
-        }
         throw err;
       }
     }
     uploadedMediaList.push(...results);
 
     if (offlineQueue.length > 0) {
-      console.log(`[Upload] Redis offline. Processing ${offlineQueue.length} media items in background batches of 5.`);
+      console.log(`[Upload] Processing ${offlineQueue.length} media items in background batches of 5.`);
       setTimeout(async () => {
         const processInBatches = async (items: any[], batchSize: number) => {
           for (let i = 0; i < items.length; i += batchSize) {
             const batch = items.slice(i, i + batchSize);
-            await Promise.all(batch.map(item => processMediaLocal(item.id, item.type, item.studioId).catch(procErr => {
-              console.error(`[Sync Process Error]: Failed to process media ${item.id}:`, procErr);
-            })));
+            await Promise.all(
+              batch.map((item) =>
+                processMediaLocal(item.id, item.type, item.studioId).catch((procErr) => {
+                  console.error(`[Sync Process Error]: Failed to process media ${item.id}:`, procErr);
+                })
+              )
+            );
           }
         };
         await processInBatches(offlineQueue, 5);
@@ -178,11 +190,147 @@ export const uploadMedia = async (req: AuthRequest, res: Response) => {
 };
 
 /**
- * Get media files for the gallery (all statuses so users can see uploads in progress)
+ * Stream media file directly from Cloudflare R2
+ * Supports HTTP Range requests for fast video playback and permanent browser caching
+ */
+export const streamMediaFile = async (req: Request, res: Response) => {
+  try {
+    const rawKey = (req.params as any).key || req.params[0] || (req.query as any).key;
+    if (!rawKey) return res.status(400).send('Missing file key');
+
+    const key = decodeURIComponent(rawKey);
+
+    // If a public CDN URL is configured, redirect directly
+    if (process.env.R2_PUBLIC_URL) {
+      const publicBase = process.env.R2_PUBLIC_URL.replace(/\/+$/, '');
+      return res.redirect(302, `${publicBase}/${key}`);
+    }
+
+    const command = new GetObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: key,
+      Range: req.headers.range,
+    });
+
+    const s3Response = await r2Client.send(command);
+
+    if (s3Response.ContentRange) {
+      res.status(206);
+      res.setHeader('Content-Range', s3Response.ContentRange);
+    } else {
+      res.status(200);
+    }
+
+    res.setHeader('Accept-Ranges', 'bytes');
+    if (s3Response.ContentType) res.setHeader('Content-Type', s3Response.ContentType);
+    if (s3Response.ContentLength) res.setHeader('Content-Length', s3Response.ContentLength);
+    if (s3Response.ETag) res.setHeader('ETag', s3Response.ETag);
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+
+    (s3Response.Body as any).pipe(res);
+  } catch (error: any) {
+    if (error.name === 'NoSuchKey' || error.$metadata?.httpStatusCode === 404) {
+      return res.status(404).send('File not found in storage');
+    }
+    console.error('[StreamMediaFile Error]:', error);
+    return res.status(500).send('Failed to stream media');
+  }
+};
+
+/**
+ * Generate Presigned Upload URLs for high-speed direct client uploads to Cloudflare R2
+ */
+export const getPresignedUploadUrls = async (req: AuthRequest, res: Response) => {
+  const { eventId } = req.params;
+  const { files } = req.body; // Array of { name, type, size, folderPath }
+
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+    if (!files || !Array.isArray(files) || files.length === 0) {
+      return res.status(400).json({ error: 'No files specified' });
+    }
+
+    const event = await Event.findById(eventId);
+    if (!event) return res.status(404).json({ error: 'Event not found' });
+
+    const studio = await Studio.findById(event.studioId);
+    if (!studio) return res.status(404).json({ error: 'Studio not found' });
+
+    // Enforce limits based on plan (Bypass for SUPER_ADMIN)
+    if (!isSuperAdmin(req.user)) {
+      const planKey = (studio.subscriptionPlan || 'BASIC').toUpperCase();
+      const limits: Record<string, { photos: number; videos: number }> = {
+        BASIC: { photos: 50000, videos: 10 },
+        STANDARD: { photos: 50000, videos: 20 },
+        ESSENTIAL: { photos: 150000, videos: 50 },
+        PREMIUM: { photos: 400000, videos: 100 },
+        STARTER: { photos: 50000, videos: 10 },
+        PROFESSIONAL: { photos: 150000, videos: 50 },
+        BUSINESS: { photos: 300000, videos: 200 },
+        ENTERPRISE: { photos: 400000, videos: 100 },
+      };
+      const planLimit = limits[planKey] || limits.BASIC;
+
+      const newPhotosCount = files.filter((f) => !(f.type && f.type.startsWith('video/'))).length;
+      const newVideosCount = files.filter((f) => f.type && f.type.startsWith('video/')).length;
+
+      const currentPhotos = studio.usage?.photosUploaded || 0;
+      const currentVideos = studio.usage?.videosUploaded || 0;
+      const pendingPhotos = await Media.countDocuments({ studioId: studio._id, type: 'PHOTO', creditDeducted: false });
+      const pendingVideos = await Media.countDocuments({ studioId: studio._id, type: 'VIDEO', creditDeducted: false });
+
+      const totalPhotos = currentPhotos + pendingPhotos;
+      const totalVideos = currentVideos + pendingVideos;
+
+      if (newPhotosCount > 0 && totalPhotos + newPhotosCount > planLimit.photos) {
+        return res.status(403).json({
+          error: `Photo storage limit exceeded. Your ${planKey} plan allows up to ${planLimit.photos.toLocaleString('en-IN')} photos (${Math.max(0, planLimit.photos - totalPhotos)} remaining). Please upgrade your plan.`,
+        });
+      }
+      if (newVideosCount > 0 && totalVideos + newVideosCount > planLimit.videos) {
+        return res.status(403).json({
+          error: `Video storage limit exceeded. Your ${planKey} plan allows up to ${planLimit.videos} videos (${Math.max(0, planLimit.videos - totalVideos)} remaining). Please upgrade your plan.`,
+        });
+      }
+    }
+
+    const results = await Promise.all(
+      files.map(async (file: any) => {
+        const isVideo = file.type?.startsWith('video/') || /\.(mp4|mov|avi|mkv|webm|m4v|3gp)$/i.test(file.name);
+        const type = isVideo ? 'VIDEO' : 'PHOTO';
+        const ext = path.extname(file.name) || (isVideo ? '.mp4' : '.jpg');
+        const safeBaseName = path.basename(file.name, ext).replace(/[^a-zA-Z0-9_-]/g, '_');
+        const key = `events/${eventId}/${type.toLowerCase()}s/${Date.now()}_${uuidv4().slice(0, 8)}_${safeBaseName}${ext}`;
+        const contentType = file.type || (isVideo ? 'video/mp4' : 'image/jpeg');
+
+        const uploadUrl = await generatePresignedUploadUrl(key, contentType, 3600);
+        const publicUrl = getFileUrl(key);
+
+        return {
+          name: file.name,
+          uploadUrl,
+          publicId: key,
+          url: publicUrl,
+          type,
+          size: file.size || 0,
+          folderPath: file.folderPath || '',
+        };
+      })
+    );
+
+    return res.json({ urls: results });
+  } catch (err: any) {
+    console.error('[getPresignedUploadUrls Error]:', err);
+    return res.status(500).json({ error: err.message });
+  }
+};
+
+/**
+ * Get media files for the gallery
  */
 export const getEventMedia = async (req: Request, res: Response) => {
   const { eventId } = req.params;
-  const { type } = req.query; // 'PHOTO' or 'VIDEO' optional filter
+  const { type } = req.query;
 
   try {
     const query: any = { eventId };
@@ -198,10 +346,10 @@ export const getEventMedia = async (req: Request, res: Response) => {
 };
 
 /**
- * Returns presigned original download URLs for multiple media IDs
+ * Returns presigned high-speed original download URLs for multiple media IDs
  */
 export const downloadBulkMedia = async (req: Request, res: Response) => {
-  const { mediaIds } = req.body; // array of mediaIds
+  const { mediaIds } = req.body;
 
   try {
     if (!mediaIds || !Array.isArray(mediaIds) || mediaIds.length === 0) {
@@ -212,10 +360,12 @@ export const downloadBulkMedia = async (req: Request, res: Response) => {
     for (const id of mediaIds) {
       const media = await Media.findById(id);
       if (media && media.processedStatus === 'COMPLETED') {
+        const filename = media.r2Key.split('/').pop() || 'photo.jpg';
+        const downloadUrl = await generatePresignedDownloadUrl(media.r2Key, filename);
         downloadLinks.push({
           id: media._id,
-          filename: media.r2Key.split('/').pop(),
-          url: media.r2Url, // Cloudinary URLs are public by default
+          filename,
+          url: downloadUrl || media.r2Url,
         });
       }
     }
@@ -238,20 +388,18 @@ export const deleteMedia = async (req: AuthRequest, res: Response) => {
     const media = await Media.findById(mediaId);
     if (!media) return res.status(404).json({ error: 'Media not found' });
 
-    // Validate that the request is from the owner or team member of the studio
     const studio = await Studio.findOne({ ownerId: req.user._id });
     if (!studio && !isSuperAdmin(req.user)) {
       return res.status(403).json({ error: 'Unauthorized to delete this media' });
     }
 
-    // Trigger delete in Cloudinary
+    // Delete original from Cloudflare R2
     await deleteFile(media.r2Key);
-    if (media.thumbnailUrl && media.thumbnailUrl.includes('res.cloudinary.com')) {
-      // For cloudinary, we also need to extract public_id to delete thumbnails
-      // To keep it simple, we can try to guess the publicId or just skip it if we don't have it explicitly stored.
-      // Since media Worker will upload them, it will return publicId. If we stored it, we'd delete it.
-      // But we didn't add a field for thumb_public_id. 
-      // Actually, if we use the same public_id pattern, let's just let Cloudinary delete it if it exists.
+    if (media.thumbnailUrl) {
+      await deleteFile(media.thumbnailUrl);
+    }
+    if (media.compressedUrl) {
+      await deleteFile(media.compressedUrl);
     }
 
     // Delete embeddings
@@ -271,7 +419,7 @@ export const deleteMedia = async (req: AuthRequest, res: Response) => {
  */
 export const deleteBulkMedia = async (req: AuthRequest, res: Response) => {
   const { eventId } = req.params;
-  const { mediaIds } = req.body; // optional array of media IDs
+  const { mediaIds } = req.body;
 
   try {
     if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
@@ -279,13 +427,11 @@ export const deleteBulkMedia = async (req: AuthRequest, res: Response) => {
     const event = await Event.findById(eventId);
     if (!event) return res.status(404).json({ error: 'Event not found' });
 
-    // Validate that the request is from the owner
     const studio = await Studio.findOne({ ownerId: req.user._id });
     if (!studio && !isSuperAdmin(req.user)) {
       return res.status(403).json({ error: 'Unauthorized to delete media for this event' });
     }
 
-    // Determine query
     const query: any = { eventId };
     if (mediaIds && Array.isArray(mediaIds) && mediaIds.length > 0) {
       query._id = { $in: mediaIds };
@@ -296,14 +442,17 @@ export const deleteBulkMedia = async (req: AuthRequest, res: Response) => {
       return res.json({ message: 'No media found to delete' });
     }
 
-    const { deleteFile } = await import('../services/StorageService');
-
-    // Delete from Cloudinary
+    const keysToDelete: string[] = [];
     for (const media of mediaList) {
-      await deleteFile(media.r2Key).catch(err => console.warn(`Failed to delete ${media.r2Key}:`, err));
+      if (media.r2Key) keysToDelete.push(media.r2Key);
+      if (media.thumbnailUrl) keysToDelete.push(media.thumbnailUrl);
+      if (media.compressedUrl) keysToDelete.push(media.compressedUrl);
     }
 
-    const idsToDelete = mediaList.map(m => m._id);
+    // Delete all from Cloudflare R2 in chunks
+    await deleteFiles(keysToDelete);
+
+    const idsToDelete = mediaList.map((m) => m._id);
 
     // Delete embeddings
     await FaceEmbedding.deleteMany({ mediaId: { $in: idsToDelete } });
@@ -319,7 +468,7 @@ export const deleteBulkMedia = async (req: AuthRequest, res: Response) => {
 };
 
 /**
- * Uploads a whitelabel asset (logos, cover images) to Cloudflare R2 and returns its URL.
+ * Uploads a whitelabel asset (logos, cover images) to Cloudflare R2
  */
 export const uploadAsset = async (req: AuthRequest, res: Response) => {
   const file = req.file;
@@ -330,8 +479,8 @@ export const uploadAsset = async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: 'No file uploaded' });
     }
 
-    const folderForCloudinary = `branding/assets`;
-    const { url } = await uploadFile(file.buffer, folderForCloudinary);
+    const folderForR2 = `branding/assets`;
+    const { url } = await uploadFile(file.buffer, folderForR2, file.mimetype, file.originalname);
 
     return res.json({ url });
   } catch (err: any) {
@@ -341,14 +490,13 @@ export const uploadAsset = async (req: AuthRequest, res: Response) => {
 };
 
 /**
- * Generate ImageKit authentication parameters for client-side uploads
+ * Generate authentication parameters (legacy backward compatibility)
  */
 export const getImageKitAuth = async (req: AuthRequest, res: Response) => {
   try {
     if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
 
     const count = parseInt(req.query.count as string) || 1;
-    
     if (count > 1) {
       const signatures = [];
       for (let i = 0; i < count; i++) {
@@ -356,8 +504,7 @@ export const getImageKitAuth = async (req: AuthRequest, res: Response) => {
       }
       return res.json({ signatures });
     } else {
-      const signatureData = generateSignature();
-      return res.json(signatureData);
+      return res.json(generateSignature());
     }
   } catch (err: any) {
     console.error('ImageKit Auth Error:', err);
@@ -366,7 +513,7 @@ export const getImageKitAuth = async (req: AuthRequest, res: Response) => {
 };
 
 /**
- * Bulk create media from direct client Cloudinary uploads
+ * Bulk create media from direct client Cloudflare R2 uploads
  */
 export const bulkCreateMedia = async (req: AuthRequest, res: Response) => {
   const { eventId } = req.params;
@@ -389,18 +536,18 @@ export const bulkCreateMedia = async (req: AuthRequest, res: Response) => {
       const planKey = (studio.subscriptionPlan || 'BASIC').toUpperCase();
       const limits: Record<string, { photos: number; videos: number }> = {
         BASIC: { photos: 50000, videos: 10 },
-        STANDARD: { photos: 150000, videos: 100 },
-        ESSENTIAL: { photos: 300000, videos: 200 },
-        PREMIUM: { photos: 750000, videos: 500 },
+        STANDARD: { photos: 50000, videos: 20 },
+        ESSENTIAL: { photos: 150000, videos: 50 },
+        PREMIUM: { photos: 400000, videos: 100 },
         STARTER: { photos: 50000, videos: 10 },
-        PROFESSIONAL: { photos: 150000, videos: 100 },
+        PROFESSIONAL: { photos: 150000, videos: 50 },
         BUSINESS: { photos: 300000, videos: 200 },
-        ENTERPRISE: { photos: 750000, videos: 500 },
+        ENTERPRISE: { photos: 400000, videos: 100 },
       };
       const planLimit = limits[planKey] || limits.BASIC;
 
-      const newPhotosCount = mediaList.filter(m => (m.type || 'PHOTO') === 'PHOTO').length;
-      const newVideosCount = mediaList.filter(m => m.type === 'VIDEO').length;
+      const newPhotosCount = mediaList.filter((m) => (m.type || 'PHOTO') === 'PHOTO').length;
+      const newVideosCount = mediaList.filter((m) => m.type === 'VIDEO').length;
 
       const currentPhotos = studio.usage?.photosUploaded || 0;
       const currentVideos = studio.usage?.videosUploaded || 0;
@@ -411,31 +558,35 @@ export const bulkCreateMedia = async (req: AuthRequest, res: Response) => {
       const totalVideos = currentVideos + pendingVideos;
 
       if (newPhotosCount > 0 && totalPhotos + newPhotosCount > planLimit.photos) {
-        return res.status(403).json({ 
-          error: `Photo storage limit exceeded. Your ${planKey} plan allows up to ${planLimit.photos.toLocaleString('en-IN')} photos (${Math.max(0, planLimit.photos - totalPhotos)} remaining). Please upgrade your plan.` 
+        return res.status(403).json({
+          error: `Photo storage limit exceeded. Your ${planKey} plan allows up to ${planLimit.photos.toLocaleString('en-IN')} photos (${Math.max(0, planLimit.photos - totalPhotos)} remaining). Please upgrade your plan.`,
         });
       }
       if (newVideosCount > 0 && totalVideos + newVideosCount > planLimit.videos) {
-        return res.status(403).json({ 
-          error: `Video storage limit exceeded. Your ${planKey} plan allows up to ${planLimit.videos} videos (${Math.max(0, planLimit.videos - totalVideos)} remaining). Please upgrade your plan.` 
+        return res.status(403).json({
+          error: `Video storage limit exceeded. Your ${planKey} plan allows up to ${planLimit.videos} videos (${Math.max(0, planLimit.videos - totalVideos)} remaining). Please upgrade your plan.`,
         });
       }
     }
 
-    const newMediaDocs = mediaList.map(item => ({
-      type: item.type || 'PHOTO',
-      r2Key: item.publicId,
-      r2Url: item.url,
-      folderPath: item.folderPath || '',
-      eventId: event._id,
-      studioId: event.studioId,
-      size: item.size || 0,
-      width: item.width,
-      height: item.height,
-      uploadedBy: req.user!._id,
-      processedStatus: 'PENDING',
-      creditDeducted: false, // Will be deducted when event is saved
-    }));
+    const newMediaDocs = mediaList.map((item) => {
+      const publicId = item.publicId || item.key;
+      const url = item.url || getFileUrl(publicId);
+      return {
+        type: item.type || 'PHOTO',
+        r2Key: publicId,
+        r2Url: url,
+        folderPath: item.folderPath || '',
+        eventId: event._id,
+        studioId: event.studioId,
+        size: item.size || 0,
+        width: item.width,
+        height: item.height,
+        uploadedBy: req.user!._id,
+        processedStatus: 'PENDING',
+        creditDeducted: false,
+      };
+    });
 
     // Insert all documents at once
     const insertedMedia = await Media.insertMany(newMediaDocs);
@@ -460,13 +611,17 @@ export const bulkCreateMedia = async (req: AuthRequest, res: Response) => {
     }
 
     if (offlineQueue.length > 0) {
-      console.log(`[BulkCreate] Redis offline. Processing ${offlineQueue.length} items in background.`);
+      console.log(`[BulkCreate] Processing ${offlineQueue.length} items in background.`);
       setTimeout(async () => {
         for (let i = 0; i < offlineQueue.length; i += 5) {
           const batch = offlineQueue.slice(i, i + 5);
-          await Promise.all(batch.map(item => processMediaLocal(item.id, item.type, item.studioId).catch(procErr => {
-            console.error(`[Sync Process Error] Failed media ${item.id}:`, procErr);
-          })));
+          await Promise.all(
+            batch.map((item) =>
+              processMediaLocal(item.id, item.type, item.studioId).catch((procErr) => {
+                console.error(`[Sync Process Error] Failed media ${item.id}:`, procErr);
+              })
+            )
+          );
         }
       }, 0);
     }

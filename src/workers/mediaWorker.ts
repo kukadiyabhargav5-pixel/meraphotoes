@@ -8,7 +8,7 @@ import sharp from 'sharp';
 import ffmpeg from 'fluent-ffmpeg';
 import dotenv from 'dotenv';
 import { redisConfig } from '../config/redis';
-import { uploadFile } from '../services/StorageService';
+import { uploadFile, getFileBuffer } from '../services/StorageService';
 import { Media, FaceEmbedding, Studio, Event } from '../models';
 import { insertFaceEmbedding, isQdrantAvailable } from '../services/qdrantService';
 
@@ -42,6 +42,19 @@ checkRedis().then((available) => {
     console.log('[MediaWorker] Redis is offline – BullMQ queues disabled. Uploads will process synchronously.');
   }
 });
+
+const getCandidateAiUrls = (): string[] => {
+  const envUrl = process.env.AI_SERVICE_URL;
+  const list = [
+    envUrl,
+    'http://maraphotoes-ai:10000',
+    'http://meraphoto-ai:10000',
+    'https://maraphotoes-ai.onrender.com',
+    'https://meraphoto-ai.onrender.com',
+    'http://127.0.0.1:8000',
+  ].filter(Boolean) as string[];
+  return Array.from(new Set(list));
+};
 
 const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://127.0.0.1:8000';
 
@@ -260,7 +273,16 @@ export const processPhoto = async (mediaId: string, studioId: string) => {
   await Media.findByIdAndUpdate(mediaId, { processedStatus: 'PROCESSING' });
 
   try {
-    const originalBuffer = await downloadUrlToBuffer(media.r2Url);
+    let originalBuffer: Buffer;
+    if (media.r2Key) {
+      try {
+        originalBuffer = await getFileBuffer(media.r2Key);
+      } catch {
+        originalBuffer = await downloadUrlToBuffer(media.r2Url);
+      }
+    } else {
+      originalBuffer = await downloadUrlToBuffer(media.r2Url);
+    }
     const metadata = await sharp(originalBuffer).metadata();
     const width = metadata.width || 0;
     const height = metadata.height || 0;
@@ -293,15 +315,28 @@ export const processPhoto = async (mediaId: string, studioId: string) => {
 
     let faces = [];
     let faceIndexStatus: 'INDEXED' | 'NO_FACE' | 'FAILED' = 'NO_FACE';
-    try {
-      const aiResponse = await axios.post(`${AI_SERVICE_URL}/detect-faces`, formData, {
-        headers: { 'Content-Type': 'multipart/form-data', 'bypass-tunnel-reminder': 'true' },
-        timeout: 60000, // 60 second timeout for large images
-      });
-      faces = aiResponse.data.faces || [];
-      faceIndexStatus = faces.length > 0 ? 'INDEXED' : 'NO_FACE';
-    } catch (aiErr: any) {
-      console.warn(`[AI Warning]: AI Face Service offline. Skipping face detection for photo ${mediaId}:`, aiErr.message);
+    const candidateUrls = getCandidateAiUrls();
+    let lastAiErr: any = null;
+
+    for (const baseUrl of candidateUrls) {
+      try {
+        const aiResponse = await axios.post(`${baseUrl}/detect-faces`, formData, {
+          headers: { 'Content-Type': 'multipart/form-data', 'bypass-tunnel-reminder': 'true' },
+          timeout: 60000,
+        });
+        if (aiResponse.data && Array.isArray(aiResponse.data.faces)) {
+          faces = aiResponse.data.faces;
+          faceIndexStatus = faces.length > 0 ? 'INDEXED' : 'NO_FACE';
+          lastAiErr = null;
+          break;
+        }
+      } catch (aiErr: any) {
+        lastAiErr = aiErr;
+        console.warn(`[AI Warning]: Face detection failed on ${baseUrl}:`, aiErr.message);
+      }
+    }
+
+    if (lastAiErr && faces.length === 0) {
       faceIndexStatus = 'FAILED';
     }
     console.log(`Detected ${faces.length} faces in photo ${mediaId}`);
@@ -384,7 +419,16 @@ export const processVideo = async (mediaId: string, studioId: string) => {
   }
 
   try {
-    const originalBuffer = await downloadUrlToBuffer(media.r2Url);
+    let originalBuffer: Buffer;
+    if (media.r2Key) {
+      try {
+        originalBuffer = await getFileBuffer(media.r2Key);
+      } catch {
+        originalBuffer = await downloadUrlToBuffer(media.r2Url);
+      }
+    } else {
+      originalBuffer = await downloadUrlToBuffer(media.r2Url);
+    }
     fs.writeFileSync(tempVideoPath, originalBuffer);
 
     try {

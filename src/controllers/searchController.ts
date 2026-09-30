@@ -4,37 +4,148 @@ import { searchFaces, isQdrantAvailable, localCosineSearch } from '../services/q
 import axios from 'axios';
 import FormData from 'form-data';
 
-const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://127.0.0.1:8000';
+const getCandidateAiUrls = (): string[] => {
+  const envUrl = process.env.AI_SERVICE_URL;
+  const list = [
+    envUrl,
+    'http://maraphotoes-ai:10000',
+    'http://meraphoto-ai:10000',
+    'https://maraphotoes-ai.onrender.com',
+    'https://meraphoto-ai.onrender.com',
+    'http://127.0.0.1:8000',
+  ].filter(Boolean) as string[];
+  return Array.from(new Set(list));
+};
+
+/**
+ * L2-normalize a vector in-place (or return new array).
+ */
+const l2Normalize = (vec: number[]): number[] => {
+  let sumSq = 0;
+  for (let i = 0; i < vec.length; i++) sumSq += vec[i] * vec[i];
+  const norm = Math.sqrt(sumSq);
+  if (norm === 0) return vec;
+  if (Math.abs(norm - 1.0) < 0.01) return vec; // Already normalized
+  return vec.map(v => v / norm);
+};
 
 /**
  * Cosine similarity between two vectors.
+ * Always L2-normalizes both inputs to handle mixed normalized/unnormalized embeddings.
+ * This is critical because older indexed embeddings may have L2 norm ~22 (raw InsightFace)
+ * while newer TTA-processed embeddings are unit-normalized (norm=1.0).
  */
 const cosineSimilarity = (a: number[], b: number[]): number => {
-  if (a.length !== b.length) return 0;
-  let dot = 0, normA = 0, normB = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
+  if (a.length !== b.length || a.length === 0) return 0;
+  const na = l2Normalize(a);
+  const nb = l2Normalize(b);
+  let dot = 0;
+  for (let i = 0; i < na.length; i++) {
+    dot += na[i] * nb[i];
   }
-  if (normA === 0 || normB === 0) return 0;
-  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+  return dot;
+};
+
+/**
+ * Pre-flight AI service wake-up: pings /health to trigger Render cold-start
+ * before attempting the actual face detection request.
+ * Waits up to 30s for the service to become ready.
+ */
+const wakeUpAiService = async (): Promise<string | null> => {
+  const urls = getCandidateAiUrls();
+  
+  // Quick check: try to find an already-awake URL
+  for (const baseUrl of urls) {
+    try {
+      const res = await axios.get(`${baseUrl}/health`, { timeout: 5000 });
+      if (res.data?.engine_ready === true) {
+        return baseUrl; // Already warm and ready
+      }
+    } catch {
+      // Not available, continue
+    }
+  }
+
+  // Cold start detected: ping all URLs and wait for one to wake up
+  console.log('[Face Search] AI service appears cold. Sending wake-up pings...');
+  
+  for (let attempt = 0; attempt < 6; attempt++) { // 6 attempts × 5s = 30s max wait
+    for (const baseUrl of urls) {
+      try {
+        const res = await axios.get(`${baseUrl}/health`, { timeout: 8000 });
+        if (res.data?.engine_ready === true) {
+          console.log(`[Face Search] AI service awake at ${baseUrl} after ${(attempt + 1) * 5}s`);
+          return baseUrl;
+        }
+        if (res.data?.status === 'healthy') {
+          // Service is up but engine still loading - wait
+          console.log(`[Face Search] AI service responding but engine loading (attempt ${attempt + 1}/6)...`);
+        }
+      } catch {
+        // Still waking up
+      }
+    }
+    await new Promise(r => setTimeout(r, 5000));
+  }
+
+  return null; // Could not wake up
 };
 
 /**
  * Extract face embeddings from an uploaded file via AI service.
+ * Supports multiple candidate URLs and retries to handle Render free-tier cold starts.
+ * Includes pre-flight wake-up and 3 retry attempts per URL with exponential backoff.
  */
 const extractEmbeddingsFromFile = async (file: Express.Multer.File): Promise<any[]> => {
-  const formData = new FormData();
-  formData.append('file', file.buffer, file.originalname || 'selfie.jpg');
+  // Pre-flight: wake up the AI service if it's sleeping
+  const preferredUrl = await wakeUpAiService();
+  
+  const urls = getCandidateAiUrls();
+  // If we found a preferred (warm) URL, try it first
+  if (preferredUrl) {
+    const idx = urls.indexOf(preferredUrl);
+    if (idx > 0) {
+      urls.splice(idx, 1);
+      urls.unshift(preferredUrl);
+    }
+  }
 
-  const aiResponse = await axios.post(`${AI_SERVICE_URL}/detect-faces`, formData, {
-    headers: { ...formData.getHeaders(), 'bypass-tunnel-reminder': 'true' },
-    timeout: 30000,
-  });
+  let lastError: any = null;
 
-  return aiResponse.data.faces || [];
+  for (const baseUrl of urls) {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const formData = new FormData();
+        formData.append('file', file.buffer, file.originalname || 'selfie.jpg');
+
+        const aiResponse = await axios.post(`${baseUrl}/detect-faces`, formData, {
+          headers: { ...formData.getHeaders(), 'bypass-tunnel-reminder': 'true' },
+          timeout: 60000, // 60s timeout for cold starts
+        });
+
+        if (aiResponse.data && Array.isArray(aiResponse.data.faces)) {
+          return aiResponse.data.faces;
+        }
+      } catch (err: any) {
+        lastError = err;
+        console.warn(`[Face Search] AI service attempt ${attempt}/3 on ${baseUrl} failed:`, err.message);
+        if (err.response?.status === 503 || err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT' || err.code === 'ECONNABORTED') {
+          if (attempt < 3) {
+            // Exponential backoff: 3s, 6s
+            const delay = attempt * 3000;
+            console.log(`[Face Search] Retrying in ${delay / 1000}s...`);
+            await new Promise(r => setTimeout(r, delay));
+          }
+        } else {
+          break; // Non-retryable error, try next URL
+        }
+      }
+    }
+  }
+
+  throw lastError || new Error('No AI service endpoints reachable');
 };
+
 
 // Map to avoid duplicate concurrent indexing per event
 const activeEventIndexing: Record<string, boolean> = {};
@@ -71,28 +182,48 @@ const triggerAutoIndexing = async (eventId: string) => {
         });
         const buffer = Buffer.from(imgRes.data);
 
-        const formData = new FormData();
-        formData.append('file', buffer, 'photo.jpg');
+        let faces: any[] = [];
+        const urls = getCandidateAiUrls();
+        for (const baseUrl of urls) {
+          try {
+            const formData = new FormData();
+            formData.append('file', buffer, 'photo.jpg');
 
-        const aiRes = await axios.post(`${AI_SERVICE_URL}/detect-faces`, formData, {
-          headers: { ...formData.getHeaders(), 'bypass-tunnel-reminder': 'true' },
-          timeout: 60000,
-        });
+            const aiRes = await axios.post(`${baseUrl}/detect-faces`, formData, {
+              headers: { ...formData.getHeaders(), 'bypass-tunnel-reminder': 'true' },
+              timeout: 60000,
+            });
 
-        const faces = aiRes.data.faces || [];
+            if (aiRes.data && Array.isArray(aiRes.data.faces)) {
+              faces = aiRes.data.faces;
+              break;
+            }
+          } catch (err: any) {
+            console.warn(`[AutoIndex] Failed with ${baseUrl}:`, err.message);
+          }
+        }
         await FaceEmbedding.deleteMany({ mediaId: photo._id });
 
         for (const face of faces) {
+          // Always L2-normalize embedding before storage for consistent cosine similarity
+          const rawEmb: number[] = face.embedding || [];
+          let sumSq = 0;
+          for (const v of rawEmb) sumSq += v * v;
+          const norm = Math.sqrt(sumSq);
+          const normalizedEmb = (norm > 0 && Math.abs(norm - 1.0) > 0.01)
+            ? rawEmb.map((v: number) => v / norm)
+            : rawEmb;
+
           await FaceEmbedding.create({
             mediaId: photo._id,
             eventId: photo.eventId,
             studioId: photo.studioId,
-            embedding: face.embedding,
+            embedding: normalizedEmb,
             bbox: face.bbox,
             faceThumbnailUrl: `data:image/jpeg;base64,${face.thumbnail}`,
             detectionConfidence: face.det_score || 0,
             faceQuality: face.quality || 0,
-            modelVersion: 'buffalo_l_v1',
+            modelVersion: 'buffalo_sc_v1_normalized',
           });
         }
 
@@ -147,6 +278,7 @@ export const faceSearch = async (req: Request, res: Response): Promise<void> => 
 
     // --- Step 1: Extract query embeddings from all uploaded frames ---
     const queryEmbeddings: number[][] = [];
+    let lastAiError: any = null;
 
     for (const file of files) {
       try {
@@ -156,28 +288,20 @@ export const faceSearch = async (req: Request, res: Response): Promise<void> => 
           queryEmbeddings.push(faces[0].embedding);
         }
       } catch (aiErr: any) {
+        lastAiError = aiErr;
         console.error('[Face Search] AI service error for frame:', aiErr.message);
-        const isOffline =
-          aiErr.code === 'ECONNREFUSED' ||
-          aiErr.cause?.code === 'ECONNREFUSED' ||
-          aiErr.message?.includes('ECONNREFUSED') ||
-          aiErr.message?.includes('ENOTFOUND') ||
-          aiErr.message?.includes('connect') ||
-          aiErr.code === 'ECONNABORTED' ||
-          !aiErr.response;
-
-        if (isOffline) {
-          res.status(503).json({
-            error: 'AI Face Search service is currently offline or unreachable. Please verify the AI service status.',
-          });
-          return;
-        }
       }
     }
 
     if (queryEmbeddings.length === 0) {
+      if (lastAiError) {
+        res.status(503).json({
+          error: 'AI Face Recognition service could not be reached after multiple attempts. Please ensure the AI service is running and try again.',
+        });
+        return;
+      }
       res.status(400).json({
-        error: 'No face detected in the uploaded photo. Please try a clearer, well-lit photo of your face.',
+        error: 'No face detected in the uploaded photo. Please try a clearer, well-lit photo looking directly at the camera.',
       });
       return;
     }
@@ -208,8 +332,8 @@ export const faceSearch = async (req: Request, res: Response): Promise<void> => 
       return;
     }
 
-    // --- Step 3: Multi-query matching with adaptive clustering ---
-    // Compute peak similarity to check if target face is present in gallery
+    // --- Step 3: Multi-query matching with precision-calibrated thresholds ---
+    // Compute peak similarity to check if target face is truly present in gallery
     let peakSimilarity = 0;
     for (const face of allFaces) {
       for (const qEmb of queryEmbeddings) {
@@ -220,23 +344,40 @@ export const faceSearch = async (req: Request, res: Response): Promise<void> => 
       }
     }
 
-    // Adaptive threshold:
-    // Base threshold for InsightFace ArcFace 512-D is 0.30.
-    // If the person is identified in at least one photo (peak >= 0.34), relax to 0.28 to capture
-    // candid, angled, low-light, and group shots of the confirmed person with 100% recall.
-    let effectiveThreshold = 0.30;
-    if (event.searchThreshold && event.searchThreshold < effectiveThreshold) {
+    // High Precision & Accuracy Threshold:
+    // Base threshold for InsightFace ArcFace 512-D is 0.40.
+    // - If peakSimilarity < 0.38: Person is NOT in the gallery. No false positives will be returned!
+    // - If peakSimilarity >= 0.48: Confirmed identity with high confidence. We allow candidate photos
+    //   of this same person down to 0.36 to capture angled, candid, low-light, or sunglasses shots.
+    // - If peakSimilarity is between 0.38 and 0.48: Threshold is 0.38 (strict matching to eliminate false positives).
+    // - If event.searchThreshold is explicitly set by admin/studio, respect it, but enforce minimum 0.35.
+    let effectiveThreshold = 0.40;
+    if (event.searchThreshold && event.searchThreshold >= 0.35) {
       effectiveThreshold = event.searchThreshold;
-    }
-    if (peakSimilarity >= 0.34) {
-      effectiveThreshold = Math.min(effectiveThreshold, 0.28);
-    } else if (peakSimilarity >= 0.29) {
-      effectiveThreshold = Math.min(effectiveThreshold, 0.285);
+    } else if (peakSimilarity >= 0.48) {
+      effectiveThreshold = 0.36;
+    } else if (peakSimilarity >= 0.38) {
+      effectiveThreshold = 0.38;
+    } else {
+      effectiveThreshold = 0.38;
     }
 
     console.log(`[Face Search] Event ${eventId}: peak similarity = ${peakSimilarity.toFixed(4)}, effective threshold = ${effectiveThreshold}`);
 
-    // --- Step 3: Match gallery faces against query embeddings ---
+    // If peakSimilarity is below the matching threshold, immediately return 0 matches cleanly
+    if (peakSimilarity < effectiveThreshold) {
+      const totalPhotos = await Media.countDocuments({ eventId, type: 'PHOTO' });
+      const indexedMedia = await Media.countDocuments({ eventId, faceIndexStatus: 'INDEXED' });
+      res.status(200).json({
+        matches: [],
+        totalSearched: allFaces.length,
+        indexingStatus: { total: totalPhotos, indexed: indexedMedia, pending: pendingCount },
+        message: 'No matching photos found for this face in this album.',
+      });
+      return;
+    }
+
+    // --- Step 3: Match gallery faces against query embeddings with consensus verification ---
     const mediaMatches: Record<string, {
       bestSimilarity: number;
       matchCount: number;
@@ -244,21 +385,28 @@ export const faceSearch = async (req: Request, res: Response): Promise<void> => 
     }> = {};
 
     for (const face of allFaces) {
-      let bestSimilarity = 0;
+      let maxSimForFace = 0;
+      let sumSimForFace = 0;
 
       for (const qEmb of queryEmbeddings) {
         const sim = cosineSimilarity(qEmb, face.embedding);
-        if (sim > bestSimilarity) {
-          bestSimilarity = sim;
+        sumSimForFace += sim;
+        if (sim > maxSimForFace) {
+          maxSimForFace = sim;
         }
       }
 
-      if (bestSimilarity >= effectiveThreshold) {
+      const avgSimForFace = queryEmbeddings.length > 0 ? sumSimForFace / queryEmbeddings.length : maxSimForFace;
+
+      // Match if the best similarity across query frames exceeds the effective threshold
+      const isConsistentMatch = maxSimForFace >= effectiveThreshold;
+
+      if (isConsistentMatch) {
         const mediaId = face.mediaId.toString();
 
         if (!mediaMatches[mediaId]) {
           mediaMatches[mediaId] = {
-            bestSimilarity,
+            bestSimilarity: maxSimForFace,
             matchCount: 0,
             timestamps: [],
           };
@@ -267,8 +415,8 @@ export const faceSearch = async (req: Request, res: Response): Promise<void> => 
         const group = mediaMatches[mediaId];
         group.matchCount++;
 
-        if (bestSimilarity > group.bestSimilarity) {
-          group.bestSimilarity = bestSimilarity;
+        if (maxSimForFace > group.bestSimilarity) {
+          group.bestSimilarity = maxSimForFace;
         }
 
         if (face.timestamp !== undefined && face.timestamp !== null) {
@@ -303,8 +451,9 @@ export const faceSearch = async (req: Request, res: Response): Promise<void> => 
     const results = mediaDetails.map((media) => {
       const group = mediaMatches[media._id.toString()];
       const rawSim = group.bestSimilarity;
-      let similarityPercent = Math.round(((rawSim - 0.25) / 0.35) * 40 + 60);
-      similarityPercent = Math.min(100, Math.max(75, similarityPercent));
+      // Calibrated accuracy mapping: [0.36 .. 0.65] maps to [80% .. 100%]
+      let similarityPercent = Math.round(80 + ((rawSim - 0.36) / 0.28) * 20);
+      similarityPercent = Math.min(100, Math.max(80, similarityPercent));
 
       // Sort timestamps
       group.timestamps.sort((a, b) => a - b);
@@ -313,7 +462,7 @@ export const faceSearch = async (req: Request, res: Response): Promise<void> => 
         ...media,
         similarity: parseFloat(group.bestSimilarity.toFixed(4)),
         similarityPercent,
-        confidence: group.bestSimilarity >= 0.38 ? 'HIGH' : group.bestSimilarity >= 0.30 ? 'MEDIUM' : 'LOW',
+        confidence: group.bestSimilarity >= 0.45 ? 'HIGH' : group.bestSimilarity >= 0.38 ? 'MEDIUM' : 'LOW',
         matchCount: group.matchCount,
         timestamps: group.timestamps,
       };

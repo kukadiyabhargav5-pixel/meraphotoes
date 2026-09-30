@@ -1,24 +1,23 @@
 import { Response } from 'express';
-import { AuthRequest } from '../middlewares/auth';
+import { AuthRequest, isSuperAdmin } from '../middlewares/auth';
 import { Studio, User, Media } from '../models';
 
 export const PLAN_STORAGE_LIMITS: Record<string, { photos: number; videos: number; name: string }> = {
-  BASIC: { photos: 50000, videos: 10, name: 'Basic' },
-  STANDARD: { photos: 150000, videos: 100, name: 'Standard' },
-  ESSENTIAL: { photos: 300000, videos: 200, name: 'Essential' },
-  PREMIUM: { photos: 750000, videos: 500, name: 'Premium' },
-  STARTER: { photos: 50000, videos: 10, name: 'Basic' },
-  PROFESSIONAL: { photos: 150000, videos: 100, name: 'Standard' },
-  BUSINESS: { photos: 300000, videos: 200, name: 'Essential' },
-  ENTERPRISE: { photos: 750000, videos: 500, name: 'Premium' },
+  BASIC: { photos: 0, videos: 0, name: 'Basic Free' },
+  STARTUP: { photos: 50000, videos: 10, name: 'Startup' },
+  STARTER: { photos: 50000, videos: 10, name: 'Startup' },
+  STANDARD: { photos: 100000, videos: 20, name: 'Standard' },
+  ESSENTIAL: { photos: 150000, videos: 50, name: 'Essential' },
+  PREMIUM: { photos: 300000, videos: 100, name: 'Premium' },
+  ENTERPRISE: { photos: 300000, videos: 100, name: 'Premium' },
+  SUPER_ADMIN: { photos: 999999999, videos: 999999999, name: 'VIP Unlimited Admin (Free)' },
 };
 
-export const calculateStudioCredits = async (studioId: any, plan: string, cachedStudio?: any) => {
-  const planKey = (plan || 'BASIC').toUpperCase();
-  const limits = PLAN_STORAGE_LIMITS[planKey] || PLAN_STORAGE_LIMITS.BASIC;
+export const calculateStudioCredits = async (studioId: any, plan: string, cachedStudio?: any, isSuperAdminUser: boolean = false) => {
+  let planKey = (plan || 'BASIC').toUpperCase();
 
   const [studio, [creditedPhotos, creditedVideos, pendingPhotos, pendingVideos]] = await Promise.all([
-    cachedStudio ? Promise.resolve(cachedStudio) : Studio.findById(studioId).select('usage').lean(),
+    cachedStudio ? Promise.resolve(cachedStudio) : Studio.findById(studioId).select('usage subscriptionExpiresAt').lean(),
     Promise.all([
       Media.countDocuments({ studioId, type: 'PHOTO', creditDeducted: true }),
       Media.countDocuments({ studioId, type: 'VIDEO', creditDeducted: true }),
@@ -26,6 +25,44 @@ export const calculateStudioCredits = async (studioId: any, plan: string, cached
       Media.countDocuments({ studioId, type: 'VIDEO', creditDeducted: false })
     ])
   ]);
+
+  if (isSuperAdminUser || planKey === 'SUPER_ADMIN') {
+    return {
+      plan: 'PREMIUM',
+      planName: 'VIP Admin (Unlimited Free Access)',
+      photos: {
+        totalLimit: 999999999,
+        used: studio?.usage?.photosUploaded || creditedPhotos,
+        remaining: 999999999,
+        pendingSave: pendingPhotos,
+        projectedRemaining: 999999999,
+        percentUsed: 0,
+        rawPercent: 0
+      },
+      videos: {
+        totalLimit: 999999999,
+        used: studio?.usage?.videosUploaded || creditedVideos,
+        remaining: 999999999,
+        pendingSave: pendingVideos,
+        projectedRemaining: 999999999,
+        percentUsed: 0,
+        rawPercent: 0
+      }
+    };
+  }
+
+  // Expiration Check Logic - downgrade to BASIC if expired
+  if (studio?.subscriptionExpiresAt && new Date(studio.subscriptionExpiresAt) < new Date() && planKey !== 'BASIC') {
+    planKey = 'BASIC';
+    await Studio.findByIdAndUpdate(studioId, {
+      $set: {
+        subscriptionPlan: 'BASIC',
+        subscriptionStatus: 'EXPIRED'
+      }
+    });
+  }
+
+  const limits = PLAN_STORAGE_LIMITS[planKey] || PLAN_STORAGE_LIMITS.BASIC;
 
   // Consumed quota:
   // Uploads deduct quota permanently once event is saved.
@@ -110,7 +147,25 @@ export const getMyStudio = async (req: AuthRequest, res: Response) => {
       }
     }
 
-    const credits = await calculateStudioCredits(studio._id, studio.subscriptionPlan, studio);
+    const adminUser = isSuperAdmin(req.user);
+    if (adminUser) {
+      if (!studio) {
+        studio = await Studio.create({
+          name: 'Super Admin Studio',
+          ownerId: req.user._id,
+          subscriptionPlan: 'PREMIUM',
+          subscriptionStatus: 'ACTIVE',
+          subscriptionExpiresAt: new Date('2099-12-31'),
+        });
+      } else if (!studio.subscriptionPlan) {
+        studio.subscriptionPlan = 'PREMIUM';
+        studio.subscriptionStatus = 'ACTIVE';
+        studio.subscriptionExpiresAt = new Date('2099-12-31');
+        await studio.save();
+      }
+    }
+
+    const credits = await calculateStudioCredits(studio._id, studio.subscriptionPlan, studio, adminUser);
 
     return res.json({ studio, credits });
   } catch (err: any) {
@@ -126,11 +181,22 @@ export const getStudioCredits = async (req: AuthRequest, res: Response) => {
   try {
     if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
 
-    const studio = await Studio.findOne({ ownerId: req.user._id }).select('name subscriptionPlan usage').lean();
+    const adminUser = isSuperAdmin(req.user);
+    let studio: any = await Studio.findOne({ ownerId: req.user._id }).select('name subscriptionPlan usage').lean();
+    if (!studio && adminUser) {
+      const created = await Studio.create({
+        name: 'Super Admin Studio',
+        ownerId: req.user._id,
+        subscriptionPlan: 'PREMIUM',
+        subscriptionStatus: 'ACTIVE',
+        subscriptionExpiresAt: new Date('2099-12-31'),
+      });
+      studio = created.toObject();
+    }
     if (!studio) return res.status(404).json({ error: 'Studio profile not found' });
 
-    const credits = await calculateStudioCredits(studio._id, studio.subscriptionPlan, studio);
-    return res.json({ credits, studio: { name: studio.name, subscriptionPlan: studio.subscriptionPlan } });
+    const credits = await calculateStudioCredits(studio._id, studio.subscriptionPlan, studio, adminUser);
+    return res.json({ credits, studio: { name: studio.name, subscriptionPlan: studio.subscriptionPlan || (adminUser ? 'PREMIUM' : 'BASIC') } });
   } catch (err: any) {
     console.error('getStudioCredits error:', err);
     return res.status(500).json({ error: err.message });

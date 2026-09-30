@@ -29,7 +29,7 @@ export interface IStudio extends Document {
   facebookUrl?: string;
   ownerId: mongoose.Types.ObjectId;
   watermark: IWatermarkSettings;
-  subscriptionPlan: 'BASIC' | 'STANDARD' | 'ESSENTIAL' | 'PREMIUM' | 'STARTER' | 'PROFESSIONAL' | 'BUSINESS' | 'ENTERPRISE';
+  subscriptionPlan: 'BASIC' | 'STARTUP' | 'STANDARD' | 'ESSENTIAL' | 'PREMIUM' | 'STARTER' | 'PROFESSIONAL' | 'BUSINESS' | 'ENTERPRISE';
   subscriptionStatus: 'ACTIVE' | 'PAST_DUE' | 'CANCELLED' | 'TRIALING' | 'FREE';
   subscriptionStartDate?: Date;
   subscriptionExpiresAt?: Date;
@@ -63,7 +63,7 @@ const StudioSchema = new Schema<IStudio>({
   },
   subscriptionPlan: { 
     type: String, 
-    enum: ['BASIC', 'STANDARD', 'ESSENTIAL', 'PREMIUM', 'STARTER', 'PROFESSIONAL', 'BUSINESS', 'ENTERPRISE'], 
+    enum: ['BASIC', 'STARTUP', 'STANDARD', 'ESSENTIAL', 'PREMIUM', 'STARTER', 'PROFESSIONAL', 'BUSINESS', 'ENTERPRISE'], 
     default: 'BASIC' 
   },
   subscriptionStatus: { 
