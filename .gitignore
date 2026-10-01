@@ -3,6 +3,7 @@ mongodb_data/
 uploads/
 dist/
 .env
+!.env.example
 *.jpg
 *.png
 *.jpeg
@@ -11,3 +12,5 @@ __pycache__/
 *.pyc
 venv/
 .venv/
+*.log
+npm-debug.log*

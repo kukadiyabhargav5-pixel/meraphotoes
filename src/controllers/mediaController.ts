@@ -17,6 +17,7 @@ import {
 } from '../services/StorageService';
 import { photoQueue, videoQueue, processMediaLocal, isRedisAvailable } from '../workers/mediaWorker';
 import sharp from 'sharp';
+import { PLAN_STORAGE_LIMITS } from './studioController';
 
 /**
  * Handle bulk photo and video uploads (Backend route)
@@ -55,29 +56,18 @@ export const uploadMedia = async (req: AuthRequest, res: Response) => {
         // Enforce limits based on plan (Bypass for SUPER_ADMIN)
         if (!isSuperAdmin(req.user)) {
           const planKey = (studio.subscriptionPlan || 'BASIC').toUpperCase();
+          const limits = PLAN_STORAGE_LIMITS[planKey] || PLAN_STORAGE_LIMITS.BASIC;
           if (type === 'VIDEO') {
-            if (planKey === 'BASIC' && (studio.usage.videosUploaded || 0) >= 0) {
+            if (limits.videos <= 0) {
               throw new Error('Basic free plan does not include video uploads. Please upgrade.');
-            } else if ((planKey === 'STARTUP' || planKey === 'STARTER') && (studio.usage.videosUploaded || 0) >= 10) {
-              throw new Error('Startup plan video limit reached (Max 10 videos). Please upgrade.');
-            } else if (planKey === 'STANDARD' && (studio.usage.videosUploaded || 0) >= 20) {
-              throw new Error('Standard plan video limit reached (Max 20 videos). Please upgrade.');
-            } else if (planKey === 'ESSENTIAL' && (studio.usage.videosUploaded || 0) >= 50) {
-              throw new Error('Essential plan video limit reached (Max 50 videos). Please upgrade.');
-            } else if ((planKey === 'PREMIUM' || planKey === 'ENTERPRISE') && (studio.usage.videosUploaded || 0) >= 100) {
-              throw new Error('Premium plan video limit reached (Max 100 videos). Please upgrade.');
+            } else if ((studio.usage?.videosUploaded || 0) >= limits.videos) {
+              throw new Error(`${limits.name} plan video limit reached (Max ${limits.videos} videos). Please upgrade.`);
             }
           } else if (type === 'PHOTO') {
-            if (planKey === 'BASIC' && (studio.usage.photosUploaded || 0) >= 0) {
+            if (limits.photos <= 0) {
               throw new Error('Basic free plan does not include photo uploads. Please upgrade.');
-            } else if ((planKey === 'STARTUP' || planKey === 'STARTER') && (studio.usage.photosUploaded || 0) >= 50000) {
-              throw new Error('Startup plan photo limit reached (Max 50,000 photos). Please upgrade.');
-            } else if (planKey === 'STANDARD' && (studio.usage.photosUploaded || 0) >= 100000) {
-              throw new Error('Standard plan photo limit reached (Max 100,000 photos). Please upgrade.');
-            } else if (planKey === 'ESSENTIAL' && (studio.usage.photosUploaded || 0) >= 150000) {
-              throw new Error('Essential plan photo limit reached (Max 150,000 photos). Please upgrade.');
-            } else if ((planKey === 'PREMIUM' || planKey === 'ENTERPRISE') && (studio.usage.photosUploaded || 0) >= 300000) {
-              throw new Error('Premium plan photo limit reached (Max 300,000 photos). Please upgrade.');
+            } else if ((studio.usage?.photosUploaded || 0) >= limits.photos) {
+              throw new Error(`${limits.name} plan photo limit reached (Max ${limits.photos.toLocaleString('en-IN')} photos). Please upgrade.`);
             }
           }
         }
@@ -259,17 +249,7 @@ export const getPresignedUploadUrls = async (req: AuthRequest, res: Response) =>
     // Enforce limits based on plan (Bypass for SUPER_ADMIN)
     if (!isSuperAdmin(req.user)) {
       const planKey = (studio.subscriptionPlan || 'BASIC').toUpperCase();
-      const limits: Record<string, { photos: number; videos: number }> = {
-        BASIC: { photos: 50000, videos: 10 },
-        STANDARD: { photos: 50000, videos: 20 },
-        ESSENTIAL: { photos: 150000, videos: 50 },
-        PREMIUM: { photos: 400000, videos: 100 },
-        STARTER: { photos: 50000, videos: 10 },
-        PROFESSIONAL: { photos: 150000, videos: 50 },
-        BUSINESS: { photos: 300000, videos: 200 },
-        ENTERPRISE: { photos: 400000, videos: 100 },
-      };
-      const planLimit = limits[planKey] || limits.BASIC;
+      const planLimit = PLAN_STORAGE_LIMITS[planKey] || PLAN_STORAGE_LIMITS.BASIC;
 
       const newPhotosCount = files.filter((f) => !(f.type && f.type.startsWith('video/'))).length;
       const newVideosCount = files.filter((f) => f.type && f.type.startsWith('video/')).length;
@@ -534,17 +514,7 @@ export const bulkCreateMedia = async (req: AuthRequest, res: Response) => {
     // Enforce storage limits based on active plan (Bypass for SUPER_ADMIN)
     if (!isSuperAdmin(req.user)) {
       const planKey = (studio.subscriptionPlan || 'BASIC').toUpperCase();
-      const limits: Record<string, { photos: number; videos: number }> = {
-        BASIC: { photos: 50000, videos: 10 },
-        STANDARD: { photos: 50000, videos: 20 },
-        ESSENTIAL: { photos: 150000, videos: 50 },
-        PREMIUM: { photos: 400000, videos: 100 },
-        STARTER: { photos: 50000, videos: 10 },
-        PROFESSIONAL: { photos: 150000, videos: 50 },
-        BUSINESS: { photos: 300000, videos: 200 },
-        ENTERPRISE: { photos: 400000, videos: 100 },
-      };
-      const planLimit = limits[planKey] || limits.BASIC;
+      const planLimit = PLAN_STORAGE_LIMITS[planKey] || PLAN_STORAGE_LIMITS.BASIC;
 
       const newPhotosCount = mediaList.filter((m) => (m.type || 'PHOTO') === 'PHOTO').length;
       const newVideosCount = mediaList.filter((m) => m.type === 'VIDEO').length;

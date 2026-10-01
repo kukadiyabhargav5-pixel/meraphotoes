@@ -249,11 +249,15 @@ export const verifyPayment = async (req: AuthRequest, res: Response) => {
         updatedStudio = await Studio.findOneAndUpdate(
           { ownerId: targetUserId },
           { 
-            subscriptionPlan: planItem.planKey.toUpperCase(),
-            subscriptionStatus: 'ACTIVE',
-            subscriptionStartDate: startDate,
-            subscriptionExpiresAt: oneYearFromNow,
-            razorpaySubscriptionId: razorpayPaymentId
+            $set: {
+              subscriptionPlan: planItem.planKey.toUpperCase(),
+              subscriptionStatus: 'ACTIVE',
+              subscriptionStartDate: startDate,
+              subscriptionExpiresAt: oneYearFromNow,
+              razorpaySubscriptionId: razorpayPaymentId,
+              'usage.photosUploaded': 0,
+              'usage.videosUploaded': 0,
+            }
           },
           { new: true, upsert: true }
         );
@@ -351,13 +355,19 @@ export const createBillingSession = async (req: AuthRequest, res: Response) => {
     const studio = await Studio.findOne({ ownerId: req.user._id });
     if (!studio) return res.status(404).json({ error: 'Studio not found' });
 
-    studio.subscriptionPlan = plan;
+    const startDate = new Date();
+    const oneYearFromNow = new Date(startDate.getTime() + 365 * 24 * 60 * 60 * 1000);
+    studio.subscriptionPlan = (plan || 'BASIC').toUpperCase();
     studio.subscriptionStatus = 'ACTIVE';
+    studio.subscriptionStartDate = startDate;
+    studio.subscriptionExpiresAt = oneYearFromNow;
+    studio.usage = { photosUploaded: 0, videosUploaded: 0, aiSearchesCount: 0 };
     await studio.save();
 
     return res.json({
       subscriptionId: 'sub_' + Date.now(),
-      message: 'Plan upgraded successfully'
+      message: 'Plan upgraded successfully',
+      studio
     });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });

@@ -552,8 +552,8 @@ export const processVideo = async (mediaId: string, studioId: string) => {
 
       // Compress if the video exceeds 18MB, or optimize for web streaming
       if (originalBuffer.length > TARGET_MAX_BYTES) {
-        const safeDuration = Math.max(duration || 0, 5); // Minimum 5s
-        const totalTargetBits = TARGET_MAX_BYTES * 8; // ~150,994,944 bits
+        const safeDuration = (duration && duration > 0) ? duration : Math.max(30, Math.floor(originalBuffer.length / (1024 * 1024 * 1.5)));
+        const totalTargetBits = TARGET_MAX_BYTES * 8; // ~150,994,944 bits (18MB max)
         const audioBitrateBps = 128 * 1000; // 128 kbps audio
         const totalAudioBits = audioBitrateBps * safeDuration;
         const availableVideoBits = Math.max(totalTargetBits - totalAudioBits, totalTargetBits * 0.85);

@@ -16,14 +16,33 @@ export const PLAN_STORAGE_LIMITS: Record<string, { photos: number; videos: numbe
 export const calculateStudioCredits = async (studioId: any, plan: string, cachedStudio?: any, isSuperAdminUser: boolean = false) => {
   let planKey = (plan || 'BASIC').toUpperCase();
 
-  const [studio, [creditedPhotos, creditedVideos, pendingPhotos, pendingVideos]] = await Promise.all([
-    cachedStudio ? Promise.resolve(cachedStudio) : Studio.findById(studioId).select('usage subscriptionExpiresAt').lean(),
-    Promise.all([
-      Media.countDocuments({ studioId, type: 'PHOTO', creditDeducted: true }),
-      Media.countDocuments({ studioId, type: 'VIDEO', creditDeducted: true }),
-      Media.countDocuments({ studioId, type: 'PHOTO', creditDeducted: false }),
-      Media.countDocuments({ studioId, type: 'VIDEO', creditDeducted: false })
-    ])
+  // Ensure complete studio record with subscriptionStartDate and usage is loaded
+  let studio = cachedStudio;
+  if (!studio || studio.subscriptionStartDate === undefined || studio.usage === undefined || studio.subscriptionExpiresAt === undefined) {
+    studio = await Studio.findById(studioId).select('name usage subscriptionExpiresAt subscriptionStartDate subscriptionPlan').lean();
+  }
+
+  if ((!plan || planKey === 'BASIC') && studio?.subscriptionPlan) {
+    planKey = studio.subscriptionPlan.toUpperCase();
+  }
+
+  // Resolve plan activation date. Any media uploaded before this date belongs to previous plans/events and never consumes current plan quota.
+  let planStart: Date;
+  if (studio?.subscriptionStartDate) {
+    planStart = new Date(studio.subscriptionStartDate);
+  } else {
+    planStart = new Date();
+    await Studio.findByIdAndUpdate(studioId, { $set: { subscriptionStartDate: planStart } });
+  }
+
+  const mediaDateFilter: any = { studioId, creditDeducted: true, createdAt: { $gte: planStart } };
+  const pendingDateFilter: any = { studioId, creditDeducted: false, createdAt: { $gte: planStart } };
+
+  const [creditedPhotos, creditedVideos, pendingPhotos, pendingVideos] = await Promise.all([
+    Media.countDocuments({ ...mediaDateFilter, type: 'PHOTO' }),
+    Media.countDocuments({ ...mediaDateFilter, type: 'VIDEO' }),
+    Media.countDocuments({ ...pendingDateFilter, type: 'PHOTO' }),
+    Media.countDocuments({ ...pendingDateFilter, type: 'VIDEO' })
   ]);
 
   if (isSuperAdminUser || planKey === 'SUPER_ADMIN') {
@@ -32,7 +51,7 @@ export const calculateStudioCredits = async (studioId: any, plan: string, cached
       planName: 'VIP Admin (Unlimited Free Access)',
       photos: {
         totalLimit: 999999999,
-        used: studio?.usage?.photosUploaded || creditedPhotos,
+        used: creditedPhotos,
         remaining: 999999999,
         pendingSave: pendingPhotos,
         projectedRemaining: 999999999,
@@ -41,7 +60,7 @@ export const calculateStudioCredits = async (studioId: any, plan: string, cached
       },
       videos: {
         totalLimit: 999999999,
-        used: studio?.usage?.videosUploaded || creditedVideos,
+        used: creditedVideos,
         remaining: 999999999,
         pendingSave: pendingVideos,
         projectedRemaining: 999999999,
@@ -59,30 +78,28 @@ export const calculateStudioCredits = async (studioId: any, plan: string, cached
         subscriptionPlan: 'BASIC',
         subscriptionStatus: 'ACTIVE',
         subscriptionStartDate: new Date(),
-        subscriptionExpiresAt: null
+        subscriptionExpiresAt: null,
+        'usage.photosUploaded': 0,
+        'usage.videosUploaded': 0
       }
     });
   }
 
   const limits = PLAN_STORAGE_LIMITS[planKey] || PLAN_STORAGE_LIMITS.BASIC;
 
-  // Consumed quota:
-  // Uploads deduct quota permanently once event is saved.
-  let consumedPhotos = studio?.usage?.photosUploaded ?? 0;
-  let consumedVideos = studio?.usage?.videosUploaded ?? 0;
+  // Consumed quota for the current plan cycle is strictly the media deducted since planStart.
+  // Synchronize studio usage counters in DB so they reflect current active plan usage.
+  const totalPhotosUsed = creditedPhotos;
+  const totalVideosUsed = creditedVideos;
 
-  // Initialize if never tracked or if behind credited media count
-  if (consumedPhotos < creditedPhotos) {
-    consumedPhotos = creditedPhotos;
-    await Studio.findByIdAndUpdate(studioId, { $set: { 'usage.photosUploaded': creditedPhotos } });
+  if ((studio?.usage?.photosUploaded ?? 0) !== creditedPhotos || (studio?.usage?.videosUploaded ?? 0) !== creditedVideos) {
+    await Studio.findByIdAndUpdate(studioId, {
+      $set: {
+        'usage.photosUploaded': creditedPhotos,
+        'usage.videosUploaded': creditedVideos
+      }
+    });
   }
-  if (consumedVideos < creditedVideos) {
-    consumedVideos = creditedVideos;
-    await Studio.findByIdAndUpdate(studioId, { $set: { 'usage.videosUploaded': creditedVideos } });
-  }
-
-  const totalPhotosUsed = consumedPhotos;
-  const totalVideosUsed = consumedVideos;
 
   const photoPercent = limits.photos > 0 ? (totalPhotosUsed / limits.photos) * 100 : 0;
   const videoPercent = limits.videos > 0 ? (totalVideosUsed / limits.videos) * 100 : 0;
@@ -185,7 +202,7 @@ export const getStudioCredits = async (req: AuthRequest, res: Response) => {
     if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
 
     const adminUser = isSuperAdmin(req.user);
-    let studio: any = await Studio.findOne({ ownerId: req.user._id }).select('name subscriptionPlan usage').lean();
+    let studio: any = await Studio.findOne({ ownerId: req.user._id }).select('name subscriptionPlan usage subscriptionStartDate subscriptionExpiresAt').lean();
     if (!studio && adminUser) {
       const created = await Studio.create({
         name: 'Super Admin Studio',
@@ -358,10 +375,14 @@ export const updateStudioPlan = async (req: AuthRequest, res: Response) => {
     const studio = await Studio.findOneAndUpdate(
       { ownerId: req.user._id },
       {
-        subscriptionPlan: planKey,
-        subscriptionStatus: 'ACTIVE',
-        subscriptionStartDate: startDate,
-        subscriptionExpiresAt: expiresAt,
+        $set: {
+          subscriptionPlan: planKey,
+          subscriptionStatus: 'ACTIVE',
+          subscriptionStartDate: startDate,
+          subscriptionExpiresAt: expiresAt,
+          'usage.photosUploaded': 0,
+          'usage.videosUploaded': 0,
+        }
       },
       { new: true, upsert: true }
     );
