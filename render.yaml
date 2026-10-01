@@ -54,10 +54,27 @@ services:
       - key: OPENROUTER_API_KEY
         sync: false
       - key: AI_SERVICE_URL
-        value: http://maraphotoes-ai:10000
+        sync: false
       - key: FRONTEND_URL
         value: https://meraphoto.vercel.app
-
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET_NAME
+        sync: false
+      - key: R2_ENDPOINT
+        sync: false
+      - key: R2_REGION
+        value: auto
+      - key: R2_PUBLIC_URL
+        sync: false
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
   - type: web
     name: maraphotoes-ai
     runtime: python
