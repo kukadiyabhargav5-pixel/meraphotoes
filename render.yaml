@@ -2,7 +2,8 @@ services:
   - type: web
     name: meraphotoes
     runtime: node
-    plan: free
+    # Note: Use 'starter' ($7/mo) for always-on 24/7 zero-cold-start production, or 'free' for evaluation
+    plan: starter
     region: oregon
     repo: https://github.com/kukadiyabhargav5-pixel/meraphotoes.git
     branch: main

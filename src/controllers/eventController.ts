@@ -28,6 +28,7 @@ export const createEvent = async (req: AuthRequest, res: Response) => {
     password,
     assignedTeamEmails,
     addToPortfolio,
+    allowDownload,
     watermark,
   } = req.body;
 
@@ -95,6 +96,7 @@ export const createEvent = async (req: AuthRequest, res: Response) => {
       studioId: studio._id,
       assignedTeamMembers,
       addToPortfolio: addToPortfolio || false,
+      allowDownload: allowDownload !== undefined ? allowDownload : true,
       watermark: watermark || { isActive: false, type: 'LOGO', position: 'BOTTOM_RIGHT', width: 20, height: 20, opacity: 0.5 },
     });
 
@@ -343,6 +345,7 @@ export const updateEvent = async (req: AuthRequest, res: Response) => {
     password,
     watermark,
     addToPortfolio,
+    allowDownload,
   } = req.body;
 
   try {
@@ -410,6 +413,7 @@ export const updateEvent = async (req: AuthRequest, res: Response) => {
     if (totalDays !== undefined) event.totalDays = totalDays;
     if (days !== undefined) event.days = days;
     if (addToPortfolio !== undefined) event.addToPortfolio = addToPortfolio;
+    if (allowDownload !== undefined) event.allowDownload = allowDownload;
 
     if (accessType) {
       event.accessType = accessType;
@@ -612,3 +616,48 @@ export const updatePortfolioStatus = async (req: AuthRequest, res: Response) => 
     return res.status(500).json({ error: err.message });
   }
 };
+
+/**
+ * Update event download permission status instantly
+ */
+export const updateDownloadStatus = async (req: AuthRequest, res: Response) => {
+  const { eventId } = req.params;
+  const { allowDownload } = req.body;
+
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+    let event;
+    if (eventId.match(/^[0-9a-fA-F]{24}$/)) {
+      event = await Event.findById(eventId);
+    } else {
+      event = await Event.findOne({ code: eventId });
+    }
+    
+    if (!event) return res.status(404).json({ error: 'Event not found' });
+
+    const studio = await Studio.findOne({ ownerId: req.user._id });
+    if (!studio && !isSuperAdmin(req.user)) {
+      if (req.user.role === 'TEAM_MEMBER') {
+        const isAssigned = event.assignedTeamMembers.some(
+          (tmId) => tmId.toString() === req.user?._id.toString()
+        );
+        if (!isAssigned) {
+          return res.status(403).json({ error: 'Unauthorized to update this event' });
+        }
+      } else {
+        return res.status(403).json({ error: 'Unauthorized to update this event' });
+      }
+    }
+
+    if (allowDownload !== undefined) {
+      event.allowDownload = allowDownload;
+      await event.save();
+    }
+
+    return res.json({ message: 'Download status updated successfully', event });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+};
+

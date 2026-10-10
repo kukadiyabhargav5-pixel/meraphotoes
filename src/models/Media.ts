@@ -52,4 +52,11 @@ const MediaSchema = new Schema<IMedia>({
   timestamps: true
 });
 
+// Performance indexes for instant gallery loading, indexing lookups, and studio analytics
+MediaSchema.index({ eventId: 1, type: 1, faceIndexStatus: 1 });
+MediaSchema.index({ eventId: 1, createdAt: -1 });
+MediaSchema.index({ studioId: 1, createdAt: -1 });
+MediaSchema.index({ eventId: 1, processedStatus: 1 });
+MediaSchema.index({ uploadedBy: 1 });
+
 export const Media = mongoose.model<IMedia>('Media', MediaSchema);

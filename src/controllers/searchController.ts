@@ -1,8 +1,11 @@
 import { Request, Response } from 'express';
-import { Event, Media, FaceEmbedding } from '../models';
+import { Event, Media, FaceEmbedding, SearchSession } from '../models';
 import { searchFaces, isQdrantAvailable, localCosineSearch } from '../services/qdrantService';
+import { getObjectStream } from '../services/StorageService';
 import axios from 'axios';
 import FormData from 'form-data';
+import { v4 as uuidv4 } from 'uuid';
+const archiver = require('archiver');
 
 const getCandidateAiUrls = (): string[] => {
   const envUrl = process.env.AI_SERVICE_URL;
@@ -482,12 +485,31 @@ export const faceSearch = async (req: Request, res: Response): Promise<void> => 
 
     console.log(`[Face Search] Found ${results.length} matching photos for event ${eventId} (searched ${allFaces.length} faces, ${queryEmbeddings.length} query frames)`);
 
+    // Create durable search session record for verified results ZIP download
+    let searchSessionId = '';
+    if (results.length > 0) {
+      searchSessionId = uuidv4();
+      try {
+        await SearchSession.create({
+          sessionId: searchSessionId,
+          eventId: event._id,
+          matchedMediaIds: results.map((r) => r._id),
+          totalMatched: results.length,
+          peakSimilarity,
+          queryFramesCount: queryEmbeddings.length,
+        });
+      } catch (sessErr) {
+        console.error('[Face Search] Failed to create search session record:', sessErr);
+      }
+    }
+
     if (pendingMedia > 0) {
       triggerAutoIndexing(eventId.toString());
     }
 
     res.status(200).json({
       matches: results,
+      searchSessionId,
       count: results.length,
       totalSearched: allFaces.length,
       queryFramesUsed: queryEmbeddings.length,
@@ -504,5 +526,145 @@ export const faceSearch = async (req: Request, res: Response): Promise<void> => 
   } catch (error) {
     console.error('Face search error:', error);
     res.status(500).json({ error: 'Internal server error during face search.' });
+  }
+};
+
+/**
+ * Streams a ZIP archive containing ONLY the photos that matched the current face search session.
+ * Enforces strict album matching, deduplication, valid search session, and streaming without
+ * loading full-resolution images into RAM.
+ *
+ * Endpoint: POST /api/face-scan/download-zip
+ * Payload: { albumId, searchSessionId } or { eventId, searchSessionId }
+ */
+export const downloadFaceScanZip = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const albumId = req.body.albumId || req.body.eventId;
+    const { searchSessionId } = req.body;
+
+    if (!albumId || !searchSessionId) {
+      res.status(400).json({
+        error: 'Both albumId and searchSessionId are required to download matching photos.',
+      });
+      return;
+    }
+
+    // 1. Verify the event / album exists
+    const event = await Event.findById(albumId).select('_id name studioId allowDownload');
+    if (!event) {
+      res.status(404).json({ error: 'Album or event not found.' });
+      return;
+    }
+
+    if (event.allowDownload === false) {
+      res.status(403).json({ error: 'Photo downloads are disabled by the studio for this album.' });
+      return;
+    }
+
+    // 2. Validate the search session
+    const session = await SearchSession.findOne({
+      sessionId: searchSessionId,
+      eventId: event._id,
+    });
+
+    if (!session || !session.matchedMediaIds || session.matchedMediaIds.length === 0) {
+      res.status(404).json({
+        error: 'Search session expired or no matching photos found in this session.',
+      });
+      return;
+    }
+
+    // 3. Deduplicate and verify that all matching media belong strictly to this album
+    const uniqueMediaIds = Array.from(
+      new Set(session.matchedMediaIds.map((id) => id.toString()))
+    );
+
+    const matchingMedia = await Media.find({
+      _id: { $in: uniqueMediaIds },
+      eventId: event._id,
+      type: 'PHOTO',
+    }).select('_id r2Key r2Url compressedUrl originalName createdAt');
+
+    if (matchingMedia.length === 0) {
+      res.status(404).json({
+        error: 'No valid photos found for this search session.',
+      });
+      return;
+    }
+
+    console.log(
+      `[ZIP Download] Streaming ${matchingMedia.length} matching photos for session ${searchSessionId} in event ${albumId}`
+    );
+
+    // 4. Set required streaming ZIP headers
+    const zipFileName = 'face-scan-matching-photos.zip';
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${zipFileName}"`);
+    res.setHeader('X-Total-Count', matchingMedia.length.toString());
+
+    // 5. Initialize streaming archiver (level 0 = STORE for instant JPEGs with zero CPU overhead)
+    const createZipStream = (options: any) => {
+      if (typeof archiver === 'function') return archiver('zip', options);
+      if (archiver.ZipArchive) return new archiver.ZipArchive(options);
+      if (archiver.default && typeof archiver.default === 'function') return archiver.default('zip', options);
+      if (archiver.default?.ZipArchive) return new archiver.default.ZipArchive(options);
+      return new archiver.ZipArchive(options);
+    };
+
+    const archive = createZipStream({
+      zlib: { level: 0 },
+    });
+
+    archive.on('warning', (err: any) => {
+      if (err.code === 'ENOENT') {
+        console.warn('[ZIP Download] Archive warning:', err);
+      } else {
+        console.error('[ZIP Download] Archive warning error:', err);
+      }
+    });
+
+    archive.on('error', (err: any) => {
+      console.error('[ZIP Download] Archive error:', err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Failed to generate photo ZIP archive.' });
+      }
+    });
+
+    // Pipe archive stream directly into HTTP response
+    archive.pipe(res);
+
+    // 6. Stream each verified photo from Cloudflare R2 into archive
+    let appendedCount = 0;
+    for (let i = 0; i < matchingMedia.length; i++) {
+      const media = matchingMedia[i];
+      const key = media.r2Key;
+      if (!key) continue;
+
+      try {
+        const fileStream = await getObjectStream(key);
+        const ext = key.endsWith('.png') ? '.png' : key.endsWith('.webp') ? '.webp' : '.jpg';
+        const sanitizedBase = (media as any).originalName
+          ? (media as any).originalName.replace(/[^a-zA-Z0-9._-]/g, '_')
+          : `photo_${i + 1}${ext}`;
+        const entryName = `photo_${String(i + 1).padStart(3, '0')}_${sanitizedBase}`;
+
+        archive.append(fileStream as any, { name: entryName });
+        appendedCount++;
+      } catch (streamErr: any) {
+        console.warn(`[ZIP Download] Failed to stream photo ${key} from R2:`, streamErr.message);
+      }
+    }
+
+    if (appendedCount === 0) {
+      console.error('[ZIP Download] No photos could be read from storage for session');
+    }
+
+    // 7. Finalize archive
+    await archive.finalize();
+  } catch (err: any) {
+    console.error('[ZIP Download] Unexpected error:', err);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Internal server error while creating ZIP download.' });
+    }
   }
 };

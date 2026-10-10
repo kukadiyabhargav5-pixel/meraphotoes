@@ -313,60 +313,70 @@ export const processPhoto = async (mediaId: string, studioId: string) => {
     const fileBlob = new Blob([new Uint8Array(originalBuffer)], { type: 'image/jpeg' });
     formData.append('file', fileBlob, 'image.jpg');
 
-    let faces = [];
-    let faceIndexStatus: 'INDEXED' | 'NO_FACE' | 'FAILED' = 'NO_FACE';
-    const candidateUrls = getCandidateAiUrls();
-    let lastAiErr: any = null;
+    let faces: any[] = [];
+    let faceIndexStatus: 'INDEXED' | 'NO_FACE' | 'FAILED' = media.faceIndexStatus === 'INDEXED' ? 'INDEXED' : 'NO_FACE';
 
-    for (const baseUrl of candidateUrls) {
-      try {
-        const aiResponse = await axios.post(`${baseUrl}/detect-faces`, formData, {
-          headers: { 'Content-Type': 'multipart/form-data', 'bypass-tunnel-reminder': 'true' },
-          timeout: 60000,
-        });
-        if (aiResponse.data && Array.isArray(aiResponse.data.faces)) {
-          faces = aiResponse.data.faces;
-          faceIndexStatus = faces.length > 0 ? 'INDEXED' : 'NO_FACE';
-          lastAiErr = null;
-          break;
+    if (media.faceIndexStatus === 'INDEXED') {
+      console.log(`[MediaWorker] Photo ${mediaId} is already indexed. Skipping redundant AI processing.`);
+    } else {
+      const formData = new FormData();
+      // Send original image to AI service for best face detection
+      const fileBlob = new Blob([new Uint8Array(originalBuffer)], { type: 'image/jpeg' });
+      formData.append('file', fileBlob, 'image.jpg');
+
+      const candidateUrls = getCandidateAiUrls();
+      let lastAiErr: any = null;
+
+      for (const baseUrl of candidateUrls) {
+        try {
+          const aiResponse = await axios.post(`${baseUrl}/detect-faces`, formData, {
+            headers: { 'Content-Type': 'multipart/form-data', 'bypass-tunnel-reminder': 'true' },
+            timeout: 60000,
+          });
+          if (aiResponse.data && Array.isArray(aiResponse.data.faces)) {
+            faces = aiResponse.data.faces;
+            faceIndexStatus = faces.length > 0 ? 'INDEXED' : 'NO_FACE';
+            lastAiErr = null;
+            break;
+          }
+        } catch (aiErr: any) {
+          lastAiErr = aiErr;
+          console.warn(`[AI Warning]: Face detection failed on ${baseUrl}:`, aiErr.message);
         }
-      } catch (aiErr: any) {
-        lastAiErr = aiErr;
-        console.warn(`[AI Warning]: Face detection failed on ${baseUrl}:`, aiErr.message);
       }
-    }
 
-    if (lastAiErr && faces.length === 0) {
-      faceIndexStatus = 'FAILED';
-    }
-    console.log(`Detected ${faces.length} faces in photo ${mediaId}`);
+      if (lastAiErr && faces.length === 0) {
+        faceIndexStatus = 'FAILED';
+      }
+      console.log(`Detected ${faces.length} faces in photo ${mediaId}`);
 
-    for (const face of faces) {
-      const faceDoc = await FaceEmbedding.create({
-        mediaId: media._id,
-        eventId: media.eventId,
-        studioId: media.studioId,
-        embedding: face.embedding,
-        bbox: face.bbox,
-        faceThumbnailUrl: `data:image/jpeg;base64,${face.thumbnail}`,
-        detectionConfidence: face.det_score || 0,
-        faceQuality: face.quality || 0,
-        modelVersion: 'buffalo_l_v1',
-        imageWidth: width,
-        imageHeight: height,
-      });
-      
-      try {
-        if (await isQdrantAvailable()) {
-          await insertFaceEmbedding(
-            media.eventId.toString(),
-            media._id.toString(),
-            face.embedding,
-            faceDoc._id.toString()
-          );
+      for (const face of faces) {
+        const faceDoc = await FaceEmbedding.create({
+          mediaId: media._id,
+          eventId: media.eventId,
+          studioId: media.studioId,
+          embedding: face.embedding,
+          bbox: face.bbox,
+          faceThumbnailUrl: `data:image/jpeg;base64,${face.thumbnail}`,
+          detectionConfidence: face.det_score || 0,
+          faceQuality: face.quality || 0,
+          modelVersion: 'buffalo_l_v1',
+          imageWidth: width,
+          imageHeight: height,
+        });
+        
+        try {
+          if (await isQdrantAvailable()) {
+            await insertFaceEmbedding(
+              media.eventId.toString(),
+              media._id.toString(),
+              face.embedding,
+              faceDoc._id.toString()
+            );
+          }
+        } catch (qErr) {
+          console.warn(`[Qdrant] Failed to insert face embedding for photo ${mediaId}:`, qErr);
         }
-      } catch (qErr) {
-        console.warn(`[Qdrant] Failed to insert face embedding for photo ${mediaId}:`, qErr);
       }
     }
 

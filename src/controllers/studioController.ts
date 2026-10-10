@@ -323,36 +323,83 @@ export const uploadStudioLogo = async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: 'No logo image file uploaded' });
     }
 
-    const { uploadFile } = await import('../services/StorageService');
-    const { url } = await uploadFile(file.buffer, 'studios/logos');
+    // Validate MIME type
+    const validMimes = ['image/jpeg', 'image/png', 'image/webp', 'image/svg+xml'];
+    if (file.mimetype && !validMimes.includes(file.mimetype)) {
+      return res.status(400).json({ error: 'Invalid file format. Please upload JPG, PNG, WEBP, or SVG.' });
+    }
 
     let studio = await Studio.findOne({ ownerId: req.user._id });
     if (!studio) {
       studio = await Studio.create({
         name: (req.user.name || 'Mara') + ' Studio',
         ownerId: req.user._id,
-        logoUrl: url,
         subscriptionPlan: 'BASIC',
         subscriptionStatus: 'ACTIVE',
       });
-    } else {
-      studio.logoUrl = url;
-      if (!studio.watermark) {
-        studio.watermark = { type: 'NONE', opacity: 0.5, size: 50, position: 'BOTTOM_RIGHT' };
-      }
-      studio.watermark.logoUrl = url;
-      await studio.save();
     }
+
+    const { uploadFile, deleteFile } = await import('../services/StorageService');
+
+    // Store in structured R2 path: studios/{studioId}/logo/{filename}
+    const folder = `studios/${studio._id}/logo`;
+    const { url, publicId } = await uploadFile(file.buffer, folder, file.mimetype, file.originalname);
+
+    // If previous logo key exists and is different, cleanup old logo from R2
+    if (studio.logoKey && studio.logoKey !== publicId) {
+      deleteFile(studio.logoKey).catch((delErr) => console.warn('[Logo] Old logo cleanup notice:', delErr));
+    }
+
+    studio.logoUrl = url;
+    studio.logoKey = publicId;
+    if (!studio.watermark) {
+      studio.watermark = { type: 'NONE', opacity: 0.5, size: 50, position: 'BOTTOM_RIGHT' };
+    }
+    studio.watermark.logoUrl = url;
+    await studio.save();
 
     return res.status(200).json({
       success: true,
       message: 'Studio logo uploaded and saved successfully',
       logoUrl: url,
+      logoKey: publicId,
       studio,
     });
   } catch (err: any) {
     console.error('uploadStudioLogo error:', err);
     return res.status(500).json({ error: err.message || 'Failed to upload studio logo' });
+  }
+};
+
+/**
+ * Delete studio logo safely from Cloudflare R2 and MongoDB
+ */
+export const deleteStudioLogo = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const studio = await Studio.findOne({ ownerId: req.user._id });
+    if (!studio) return res.status(404).json({ error: 'Studio not found' });
+
+    if (studio.logoKey) {
+      const { deleteFile } = await import('../services/StorageService');
+      await deleteFile(studio.logoKey).catch((e) => console.warn('Could not delete old R2 logo:', e));
+    }
+
+    studio.logoUrl = undefined;
+    studio.logoKey = undefined;
+    if (studio.watermark) {
+      studio.watermark.logoUrl = undefined;
+    }
+    await studio.save();
+
+    return res.status(200).json({
+      success: true,
+      message: 'Studio logo removed successfully',
+      studio,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to remove studio logo' });
   }
 };
 

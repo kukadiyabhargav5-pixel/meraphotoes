@@ -13,6 +13,7 @@ import clientTicketRoutes from './clientTicketRoutes';
 import adminRoutes from './adminRoutes';
 import contactRoutes from './contactRoutes';
 import faceIndexRoutes from './faceIndexRoutes';
+import { downloadFaceScanZip } from '../controllers/searchController';
 
 const router = Router();
 
@@ -31,5 +32,8 @@ router.use('/visitors', visitorRoutes);
 router.use('/client-tickets', clientTicketRoutes);
 router.use('/contact', contactRoutes);
 router.use('/face-index', faceIndexRoutes);
+
+// Direct Face Scan matching photos ZIP streaming download endpoint
+router.post('/face-scan/download-zip', downloadFaceScanZip);
 
 export default router;

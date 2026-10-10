@@ -167,6 +167,26 @@ export const getFileBuffer = async (key: string): Promise<Buffer> => {
 };
 
 /**
+ * Streams an object directly from Cloudflare R2 as a Readable stream.
+ * Enables zero-buffer streaming into ZIP archives without high RAM usage.
+ */
+export const getObjectStream = async (key: string): Promise<NodeJS.ReadableStream> => {
+  let cleanKey = key;
+  if (cleanKey.includes('/api/media/file/')) {
+    cleanKey = cleanKey.split('/api/media/file/')[1];
+  } else if (process.env.R2_PUBLIC_URL && cleanKey.includes(process.env.R2_PUBLIC_URL)) {
+    cleanKey = cleanKey.replace(process.env.R2_PUBLIC_URL.replace(/\/+$/, '') + '/', '');
+  }
+
+  const command = new GetObjectCommand({
+    Bucket: R2_BUCKET,
+    Key: cleanKey,
+  });
+  const res = await r2Client.send(command);
+  return res.Body as unknown as NodeJS.ReadableStream;
+};
+
+/**
  * Generates a presigned PUT URL for direct client-to-R2 high-speed upload.
  */
 export const generatePresignedUploadUrl = async (

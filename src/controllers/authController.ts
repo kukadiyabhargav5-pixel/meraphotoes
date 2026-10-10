@@ -29,11 +29,12 @@ export const registerStudioOwner = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'All fields are required' });
     }
 
-    if (!/^[6-9]\d{9}$/.test(phone)) {
+    const cleanPhone = phone ? String(phone).replace(/\D/g, '').slice(-10) : '';
+    if (!/^[6-9]\d{9}$/.test(cleanPhone)) {
       return res.status(400).json({ error: 'Mobile number must be exactly 10 digits and start with 6, 7, 8, or 9.' });
     }
 
-    const passwordRegex = /^[A-Z](?=.*[a-z])(?=.*\d)(?=.*[@$!%*?&#]).{5,}$/;
+    const passwordRegex = /^[A-Z](?=.*[a-z])(?=.*\d)(?=.*[@$!%*?&#_\-~+=/.,><:;^]).{5,}$/;
     if (!passwordRegex.test(password)) {
       return res.status(400).json({ error: 'Password must start with a Capital letter, and contain at least 1 number, 1 special character, and small letters.' });
     }
@@ -51,7 +52,7 @@ export const registerStudioOwner = async (req: Request, res: Response) => {
     const newUser = await User.create({
       name,
       email: email.toLowerCase(),
-      phone,
+      phone: cleanPhone,
       passwordHash,
       role: 'STUDIO_OWNER',
     });

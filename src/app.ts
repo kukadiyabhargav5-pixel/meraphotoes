@@ -142,18 +142,45 @@ const startAiKeepAlive = () => {
 
 // Connect to MongoDB & Start Server
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/maraphoto';
-console.log('Connecting to database...');
+console.log('Connecting to database with connection pool...');
+
 mongoose
-  .connect(MONGO_URI)
-  .then(async () => {
+  .connect(MONGO_URI, {
+    maxPoolSize: 25,
+    minPoolSize: 5,
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 45000,
+  })
+  .then(() => {
     console.log('Connected to MongoDB Database successfully.');
-    await initializeQdrant();
-    startEventRetentionScheduler();
-    app.listen(PORT, () => {
+    
+    // Start listening immediately to satisfy Render health check instantly
+    const server = app.listen(PORT, () => {
       console.log(`Backend server running on port ${PORT}`);
-      // Start AI service keep-alive after server is ready
+      // Non-blocking background initializations
+      initializeQdrant().catch((err) => console.warn('[Qdrant] Background init notice:', err?.message));
+      startEventRetentionScheduler();
       startAiKeepAlive();
     });
+
+    // Graceful shutdown handling for zero downtime deployments
+    const gracefulShutdown = async (signal: string) => {
+      console.log(`[Server] Received ${signal}. Starting graceful shutdown...`);
+      if (aiKeepAliveTimer) clearInterval(aiKeepAliveTimer);
+      server.close(async () => {
+        console.log('[Server] Closed HTTP server.');
+        try {
+          await mongoose.connection.close(false);
+          console.log('[Server] Closed MongoDB connection.');
+        } catch (e) {
+          console.error('[Server] Error closing MongoDB:', e);
+        }
+        process.exit(0);
+      });
+    };
+
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
   })
   .catch((err) => {
     console.error('Database connection failure:', err);

@@ -90,8 +90,8 @@ export const uploadMedia = async (req: AuthRequest, res: Response) => {
           }
         }
 
-        // Upload buffer directly to Cloudflare R2
-        const folderPathForR2 = `events/${eventId}/${type.toLowerCase()}s`;
+        // Upload buffer directly to Cloudflare R2 with structured studio/album hierarchy
+        const folderPathForR2 = `studios/${event.studioId}/albums/${eventId}/${type.toLowerCase()}s`;
         const { url: r2Url, publicId: r2Key } = await uploadFile(
           finalBuffer,
           folderPathForR2,
