@@ -188,13 +188,14 @@ export const streamMediaFile = async (req: Request, res: Response) => {
     const rawKey = (req.params as any).key || req.params[0] || (req.query as any).key;
     if (!rawKey) return res.status(400).send('Missing file key');
 
-    const key = decodeURIComponent(rawKey);
-
-    // If a public CDN URL is configured, redirect directly
-    if (process.env.R2_PUBLIC_URL) {
-      const publicBase = process.env.R2_PUBLIC_URL.replace(/\/+$/, '');
-      return res.redirect(302, `${publicBase}/${key}`);
+    let key = decodeURIComponent(rawKey).trim();
+    if (key.includes('.r2.dev/')) {
+      key = key.split('.r2.dev/')[1] || key;
     }
+    if (key.includes('/api/media/file/')) {
+      key = key.split('/api/media/file/')[1] || key;
+    }
+    key = key.replace(/^\/+/, '');
 
     const command = new GetObjectCommand({
       Bucket: R2_BUCKET,
@@ -211,6 +212,8 @@ export const streamMediaFile = async (req: Request, res: Response) => {
       res.status(200);
     }
 
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
     res.setHeader('Accept-Ranges', 'bytes');
     if (s3Response.ContentType) res.setHeader('Content-Type', s3Response.ContentType);
     if (s3Response.ContentLength) res.setHeader('Content-Length', s3Response.ContentLength);
@@ -319,7 +322,15 @@ export const getEventMedia = async (req: Request, res: Response) => {
     }
 
     const mediaList = await Media.find(query).sort({ createdAt: -1 });
-    return res.json({ media: mediaList });
+    const sanitizedMedia = mediaList.map((m) => {
+      const doc: any = m.toObject();
+      if (doc.r2Url) doc.r2Url = getFileUrl(doc.r2Url);
+      if (doc.compressedUrl) doc.compressedUrl = getFileUrl(doc.compressedUrl);
+      if (doc.thumbnailUrl) doc.thumbnailUrl = getFileUrl(doc.thumbnailUrl);
+      return doc;
+    });
+
+    return res.json({ media: sanitizedMedia });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }

@@ -5,6 +5,7 @@ import { AuthRequest, isSuperAdmin } from '../middlewares/auth';
 import { Event, Studio, User, Media } from '../models';
 import Customer from '../models/Customer';
 import { sendAdminNotificationEmail, sendEventInviteEmail } from '../services/EmailService';
+import { getFileUrl } from '../services/StorageService';
 
 /**
  * Creates a new event
@@ -84,7 +85,7 @@ export const createEvent = async (req: AuthRequest, res: Response) => {
       clientEmail,
       date: new Date(date),
       type,
-      coverImageUrl,
+      coverImageUrl: coverImageUrl ? getFileUrl(coverImageUrl) : coverImageUrl,
       description,
       location,
       time,
@@ -97,7 +98,12 @@ export const createEvent = async (req: AuthRequest, res: Response) => {
       assignedTeamMembers,
       addToPortfolio: addToPortfolio || false,
       allowDownload: allowDownload !== undefined ? allowDownload : true,
-      watermark: watermark || { isActive: false, type: 'LOGO', position: 'BOTTOM_RIGHT', width: 20, height: 20, opacity: 0.5 },
+      watermark: watermark
+        ? {
+            ...watermark,
+            logoUrl: watermark.logoUrl ? getFileUrl(watermark.logoUrl) : watermark.logoUrl,
+          }
+        : { isActive: false, type: 'LOGO', position: 'BOTTOM_RIGHT', width: 20, height: 20, opacity: 0.5 },
     });
 
     // Auto-sync client to Customers directory with permanent Event details
@@ -205,6 +211,7 @@ export const getMyEvents = async (req: AuthRequest, res: Response) => {
     const todayMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
     const enrichedEvents = events.map(ev => {
       const evObj = ev.toObject();
+      if (evObj.coverImageUrl) evObj.coverImageUrl = getFileUrl(evObj.coverImageUrl);
       const baseDate = ev.date ? new Date(ev.date) : new Date(ev.createdAt || ev._id.getTimestamp());
       const baseMidnight = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate()).getTime();
       const diffDays = Math.floor((todayMidnight - baseMidnight) / (1000 * 60 * 60 * 24));
@@ -250,10 +257,21 @@ export const getEventByCode = async (req: Request, res: Response) => {
     // Redact passwordHash before sending
     const eventObj = event.toObject();
     delete eventObj.passwordHash;
+    if (eventObj.coverImageUrl) eventObj.coverImageUrl = getFileUrl(eventObj.coverImageUrl);
+    if (eventObj.studioId && (eventObj.studioId as any).logoUrl) {
+      (eventObj.studioId as any).logoUrl = getFileUrl((eventObj.studioId as any).logoUrl);
+    }
 
     if (event.accessType !== 'PASSWORD' && event.accessType !== 'OTP') {
       const media = await Media.find({ eventId: event._id }).sort({ createdAt: -1 });
-      return res.json({ event: eventObj, media });
+      const sanitizedMedia = media.map(m => {
+        const doc: any = m.toObject();
+        if (doc.r2Url) doc.r2Url = getFileUrl(doc.r2Url);
+        if (doc.compressedUrl) doc.compressedUrl = getFileUrl(doc.compressedUrl);
+        if (doc.thumbnailUrl) doc.thumbnailUrl = getFileUrl(doc.thumbnailUrl);
+        return doc;
+      });
+      return res.json({ event: eventObj, media: sanitizedMedia });
     }
 
     return res.json({ event: eventObj });
