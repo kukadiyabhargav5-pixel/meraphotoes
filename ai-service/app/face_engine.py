@@ -20,7 +20,7 @@ class FaceEngine:
     def __init__(self):
         self.ready = False
         if HAS_INSIGHTFACE:
-            model_name = os.environ.get('INSIGHTFACE_MODEL', 'buffalo_sc')
+            model_name = os.environ.get('INSIGHTFACE_MODEL', 'buffalo_l')
             print(f"[FaceEngine] Initializing InsightFace {model_name} model...")
             try:
                 # Initialize the FaceAnalysis app with buffalo_sc (SCRFD-500M + MobileFaceNet)

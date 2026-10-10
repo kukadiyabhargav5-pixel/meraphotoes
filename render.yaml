@@ -2,7 +2,8 @@ services:
   - type: web
     name: meraphotoes
     runtime: node
-    plan: free
+    # Note: Use 'starter' ($7/mo) for always-on 24/7 zero-cold-start production, or 'free' for evaluation
+    plan: starter
     region: oregon
     repo: https://github.com/kukadiyabhargav5-pixel/meraphotoes.git
     branch: main
@@ -57,6 +58,20 @@ services:
         value: http://maraphotoes-ai:10000
       - key: FRONTEND_URL
         value: https://meraphoto.vercel.app
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET_NAME
+        value: maraphoto
+      - key: R2_ENDPOINT
+        sync: false
+      - key: R2_REGION
+        value: auto
+      - key: R2_PUBLIC_URL
+        sync: false
+      - key: API_URL
+        sync: false
 
   - type: web
     name: maraphotoes-ai

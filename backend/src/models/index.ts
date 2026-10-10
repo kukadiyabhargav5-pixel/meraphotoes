@@ -10,6 +10,7 @@ export * from './Bill';
 export * from './ClientTicket';
 
 export * from './Order';
+export * from './SearchSession';
 
 export { default as Bill } from './Bill';
 export { default as Booking } from './Booking';

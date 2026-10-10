@@ -3,6 +3,7 @@ import { AuthRequest } from '../middlewares/auth';
 import { Studio, User, Order } from '../models';
 import { createRazorpayOrder, verifyPaymentSignature, cancelSubscription, verifyWebhookSignature, PLAN_PRICES } from '../services/RazorpayService';
 import { calculateStudioCredits } from './studioController';
+import { sendOTPEmail } from '../services/EmailService';
 
 /**
  * Returns Razorpay public configuration
@@ -151,7 +152,7 @@ export const createOrderSession = async (req: AuthRequest, res: Response) => {
         orderId: newOrder._id.toString(),
         orderNumber,
         invoiceNumber,
-        customerName: customerDetails.fullName,
+        customerName: sanitizedCustomerDetails.fullName,
       });
     } catch (rzpErr: any) {
       console.error('[Razorpay Order Creation Failed]:', rzpErr);
@@ -248,11 +249,15 @@ export const verifyPayment = async (req: AuthRequest, res: Response) => {
         updatedStudio = await Studio.findOneAndUpdate(
           { ownerId: targetUserId },
           { 
-            subscriptionPlan: planItem.planKey.toUpperCase(),
-            subscriptionStatus: 'ACTIVE',
-            subscriptionStartDate: startDate,
-            subscriptionExpiresAt: oneYearFromNow,
-            razorpaySubscriptionId: razorpayPaymentId
+            $set: {
+              subscriptionPlan: planItem.planKey.toUpperCase(),
+              subscriptionStatus: 'ACTIVE',
+              subscriptionStartDate: startDate,
+              subscriptionExpiresAt: oneYearFromNow,
+              razorpaySubscriptionId: razorpayPaymentId,
+              'usage.photosUploaded': 0,
+              'usage.videosUploaded': 0,
+            }
           },
           { new: true, upsert: true }
         );
@@ -350,13 +355,19 @@ export const createBillingSession = async (req: AuthRequest, res: Response) => {
     const studio = await Studio.findOne({ ownerId: req.user._id });
     if (!studio) return res.status(404).json({ error: 'Studio not found' });
 
-    studio.subscriptionPlan = plan;
+    const startDate = new Date();
+    const oneYearFromNow = new Date(startDate.getTime() + 365 * 24 * 60 * 60 * 1000);
+    studio.subscriptionPlan = (plan || 'BASIC').toUpperCase();
     studio.subscriptionStatus = 'ACTIVE';
+    studio.subscriptionStartDate = startDate;
+    studio.subscriptionExpiresAt = oneYearFromNow;
+    studio.usage = { photosUploaded: 0, videosUploaded: 0, aiSearchesCount: 0 };
     await studio.save();
 
     return res.json({
       subscriptionId: 'sub_' + Date.now(),
-      message: 'Plan upgraded successfully'
+      message: 'Plan upgraded successfully',
+      studio
     });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
@@ -375,10 +386,68 @@ export const cancelMySubscription = async (req: AuthRequest, res: Response) => {
 
     studio.subscriptionPlan = 'BASIC';
     studio.subscriptionStatus = 'ACTIVE';
+    studio.subscriptionStartDate = new Date();
+    studio.subscriptionExpiresAt = undefined;
     studio.razorpaySubscriptionId = undefined;
     await studio.save();
 
-    return res.json({ message: 'Subscription cancelled successfully', subscriptionStatus: 'CANCELLED' });
+    return res.json({ message: 'Subscription cancelled successfully. Downgraded to Basic Free plan.', subscriptionStatus: 'CANCELLED', studio });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+};
+
+/**
+ * Requests an OTP for subscription cancellation
+ */
+export const requestCancelOTP = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+    
+    const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 mins
+
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+
+    user.otp = { code: otpCode, expiresAt };
+    await user.save();
+
+    await sendOTPEmail(user.email, otpCode);
+
+    return res.json({ message: 'OTP sent to your email' });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+};
+
+/**
+ * Verifies OTP and cancels subscription
+ */
+export const verifyCancelOTP = async (req: AuthRequest, res: Response) => {
+  try {
+    const { otp } = req.body;
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const user = await User.findById(req.user._id);
+    if (!user || !user.otp || user.otp.code !== otp || new Date() > user.otp.expiresAt) {
+      return res.status(400).json({ error: 'Invalid or expired OTP' });
+    }
+
+    user.otp = undefined;
+    await user.save();
+
+    const studio = await Studio.findOne({ ownerId: req.user._id });
+    if (!studio) return res.status(400).json({ error: 'Studio not found' });
+
+    studio.subscriptionPlan = 'BASIC';
+    studio.subscriptionStatus = 'ACTIVE';
+    studio.subscriptionStartDate = new Date();
+    studio.subscriptionExpiresAt = undefined;
+    studio.razorpaySubscriptionId = undefined;
+    await studio.save();
+
+    return res.json({ message: 'Subscription cancelled successfully. Downgraded to Basic Free plan.', subscriptionStatus: 'CANCELLED', studio });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }

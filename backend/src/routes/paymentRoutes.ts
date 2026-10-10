@@ -6,7 +6,9 @@ import {
   getOrderById,
   getUserOrders,
   createBillingSession, 
-  cancelMySubscription, 
+  cancelMySubscription,
+  requestCancelOTP,
+  verifyCancelOTP,
   handleRazorpayWebhook 
 } from '../controllers/paymentController';
 import { authenticateJWT } from '../middlewares/auth';
@@ -25,6 +27,10 @@ router.get('/my-orders', authenticateJWT, getUserOrders);
 // Legacy studio plan checkout endpoints
 router.post('/checkout', authenticateJWT, createBillingSession);
 router.post('/cancel', authenticateJWT, cancelMySubscription);
+
+// OTP-based cancellation flow
+router.post('/request-cancel-otp', authenticateJWT, requestCancelOTP);
+router.post('/verify-cancel-otp', authenticateJWT, verifyCancelOTP);
 
 // Webhook endpoint (Public, signature-verified inside controller)
 router.post('/webhook', handleRazorpayWebhook);

@@ -177,18 +177,26 @@ export const rebuildFaceIndex = async (req: AuthRequest, res: Response) => {
             const width = metadata.width || 0;
             const height = metadata.height || 0;
 
-            // Store embeddings
+            // Store embeddings (always L2-normalize for consistent cosine similarity)
             for (const face of faces) {
+              const rawEmb: number[] = face.embedding || [];
+              let sumSq = 0;
+              for (const v of rawEmb) sumSq += v * v;
+              const norm = Math.sqrt(sumSq);
+              const normalizedEmb = (norm > 0 && Math.abs(norm - 1.0) > 0.01)
+                ? rawEmb.map((v: number) => v / norm)
+                : rawEmb;
+
               const faceDoc = await FaceEmbedding.create({
                 mediaId: photo._id,
                 eventId: photo.eventId,
                 studioId: photo.studioId,
-                embedding: face.embedding,
+                embedding: normalizedEmb,
                 bbox: face.bbox,
                 faceThumbnailUrl: `data:image/jpeg;base64,${face.thumbnail}`,
                 detectionConfidence: face.det_score || 0,
                 faceQuality: face.quality || 0,
-                modelVersion: 'buffalo_l_v1',
+                modelVersion: 'buffalo_sc_v1_normalized',
                 imageWidth: width,
                 imageHeight: height,
               });
@@ -296,16 +304,25 @@ export const retryFailedIndexing = async (req: AuthRequest, res: Response) => {
           const metadata = await sharp.default(buffer).metadata();
 
           for (const face of faces) {
+            // Always L2-normalize embedding before storage
+            const rawEmb: number[] = face.embedding || [];
+            let sumSq = 0;
+            for (const v of rawEmb) sumSq += v * v;
+            const norm = Math.sqrt(sumSq);
+            const normalizedEmb = (norm > 0 && Math.abs(norm - 1.0) > 0.01)
+              ? rawEmb.map((v: number) => v / norm)
+              : rawEmb;
+
             const faceDoc = await FaceEmbedding.create({
               mediaId: photo._id,
               eventId: photo.eventId,
               studioId: photo.studioId,
-              embedding: face.embedding,
+              embedding: normalizedEmb,
               bbox: face.bbox,
               faceThumbnailUrl: `data:image/jpeg;base64,${face.thumbnail}`,
               detectionConfidence: face.det_score || 0,
               faceQuality: face.quality || 0,
-              modelVersion: 'buffalo_l_v1',
+              modelVersion: 'buffalo_sc_v1_normalized',
               imageWidth: metadata.width || 0,
               imageHeight: metadata.height || 0,
             });

@@ -1,49 +1,105 @@
 import { Response } from 'express';
-import { AuthRequest } from '../middlewares/auth';
+import { AuthRequest, isSuperAdmin } from '../middlewares/auth';
 import { Studio, User, Media } from '../models';
 
 export const PLAN_STORAGE_LIMITS: Record<string, { photos: number; videos: number; name: string }> = {
-  BASIC: { photos: 50000, videos: 10, name: 'Basic' },
-  STANDARD: { photos: 150000, videos: 100, name: 'Standard' },
-  ESSENTIAL: { photos: 300000, videos: 200, name: 'Essential' },
-  PREMIUM: { photos: 750000, videos: 500, name: 'Premium' },
-  STARTER: { photos: 50000, videos: 10, name: 'Basic' },
-  PROFESSIONAL: { photos: 150000, videos: 100, name: 'Standard' },
-  BUSINESS: { photos: 300000, videos: 200, name: 'Essential' },
-  ENTERPRISE: { photos: 750000, videos: 500, name: 'Premium' },
+  BASIC: { photos: 0, videos: 0, name: 'Basic Free' },
+  STARTUP: { photos: 50000, videos: 10, name: 'Startup' },
+  STARTER: { photos: 50000, videos: 10, name: 'Startup' },
+  STANDARD: { photos: 100000, videos: 20, name: 'Standard' },
+  ESSENTIAL: { photos: 150000, videos: 50, name: 'Essential' },
+  PREMIUM: { photos: 300000, videos: 100, name: 'Premium' },
+  ENTERPRISE: { photos: 300000, videos: 100, name: 'Premium' },
+  SUPER_ADMIN: { photos: 999999999, videos: 999999999, name: 'VIP Unlimited Admin (Free)' },
 };
 
-export const calculateStudioCredits = async (studioId: any, plan: string, cachedStudio?: any) => {
-  const planKey = (plan || 'BASIC').toUpperCase();
-  const limits = PLAN_STORAGE_LIMITS[planKey] || PLAN_STORAGE_LIMITS.BASIC;
+export const calculateStudioCredits = async (studioId: any, plan: string, cachedStudio?: any, isSuperAdminUser: boolean = false) => {
+  let planKey = (plan || 'BASIC').toUpperCase();
 
-  const [studio, [creditedPhotos, creditedVideos, pendingPhotos, pendingVideos]] = await Promise.all([
-    cachedStudio ? Promise.resolve(cachedStudio) : Studio.findById(studioId).select('usage').lean(),
-    Promise.all([
-      Media.countDocuments({ studioId, type: 'PHOTO', creditDeducted: true }),
-      Media.countDocuments({ studioId, type: 'VIDEO', creditDeducted: true }),
-      Media.countDocuments({ studioId, type: 'PHOTO', creditDeducted: false }),
-      Media.countDocuments({ studioId, type: 'VIDEO', creditDeducted: false })
-    ])
+  // Ensure complete studio record with subscriptionStartDate and usage is loaded
+  let studio = cachedStudio;
+  if (!studio || studio.subscriptionStartDate === undefined || studio.usage === undefined || studio.subscriptionExpiresAt === undefined) {
+    studio = await Studio.findById(studioId).select('name usage subscriptionExpiresAt subscriptionStartDate subscriptionPlan').lean();
+  }
+
+  if ((!plan || planKey === 'BASIC') && studio?.subscriptionPlan) {
+    planKey = studio.subscriptionPlan.toUpperCase();
+  }
+
+  // Resolve plan activation date. Any media uploaded before this date belongs to previous plans/events and never consumes current plan quota.
+  let planStart: Date;
+  if (studio?.subscriptionStartDate) {
+    planStart = new Date(studio.subscriptionStartDate);
+  } else {
+    planStart = new Date();
+    await Studio.findByIdAndUpdate(studioId, { $set: { subscriptionStartDate: planStart } });
+  }
+
+  const mediaDateFilter: any = { studioId, creditDeducted: true, createdAt: { $gte: planStart } };
+  const pendingDateFilter: any = { studioId, creditDeducted: false, createdAt: { $gte: planStart } };
+
+  const [creditedPhotos, creditedVideos, pendingPhotos, pendingVideos] = await Promise.all([
+    Media.countDocuments({ ...mediaDateFilter, type: 'PHOTO' }),
+    Media.countDocuments({ ...mediaDateFilter, type: 'VIDEO' }),
+    Media.countDocuments({ ...pendingDateFilter, type: 'PHOTO' }),
+    Media.countDocuments({ ...pendingDateFilter, type: 'VIDEO' })
   ]);
 
-  // Consumed quota:
-  // Uploads deduct quota permanently once event is saved.
-  let consumedPhotos = studio?.usage?.photosUploaded ?? 0;
-  let consumedVideos = studio?.usage?.videosUploaded ?? 0;
-
-  // Initialize if never tracked or if behind credited media count
-  if (consumedPhotos < creditedPhotos) {
-    consumedPhotos = creditedPhotos;
-    await Studio.findByIdAndUpdate(studioId, { $set: { 'usage.photosUploaded': creditedPhotos } });
+  if (isSuperAdminUser || planKey === 'SUPER_ADMIN') {
+    return {
+      plan: 'PREMIUM',
+      planName: 'VIP Admin (Unlimited Free Access)',
+      photos: {
+        totalLimit: 999999999,
+        used: creditedPhotos,
+        remaining: 999999999,
+        pendingSave: pendingPhotos,
+        projectedRemaining: 999999999,
+        percentUsed: 0,
+        rawPercent: 0
+      },
+      videos: {
+        totalLimit: 999999999,
+        used: creditedVideos,
+        remaining: 999999999,
+        pendingSave: pendingVideos,
+        projectedRemaining: 999999999,
+        percentUsed: 0,
+        rawPercent: 0
+      }
+    };
   }
-  if (consumedVideos < creditedVideos) {
-    consumedVideos = creditedVideos;
-    await Studio.findByIdAndUpdate(studioId, { $set: { 'usage.videosUploaded': creditedVideos } });
+
+  // Expiration Check Logic - downgrade to BASIC if expired
+  if (studio?.subscriptionExpiresAt && new Date(studio.subscriptionExpiresAt) < new Date() && planKey !== 'BASIC') {
+    planKey = 'BASIC';
+    await Studio.findByIdAndUpdate(studioId, {
+      $set: {
+        subscriptionPlan: 'BASIC',
+        subscriptionStatus: 'ACTIVE',
+        subscriptionStartDate: new Date(),
+        subscriptionExpiresAt: null,
+        'usage.photosUploaded': 0,
+        'usage.videosUploaded': 0
+      }
+    });
   }
 
-  const totalPhotosUsed = consumedPhotos;
-  const totalVideosUsed = consumedVideos;
+  const limits = PLAN_STORAGE_LIMITS[planKey] || PLAN_STORAGE_LIMITS.BASIC;
+
+  // Consumed quota for the current plan cycle is strictly the media deducted since planStart.
+  // Synchronize studio usage counters in DB so they reflect current active plan usage.
+  const totalPhotosUsed = creditedPhotos;
+  const totalVideosUsed = creditedVideos;
+
+  if ((studio?.usage?.photosUploaded ?? 0) !== creditedPhotos || (studio?.usage?.videosUploaded ?? 0) !== creditedVideos) {
+    await Studio.findByIdAndUpdate(studioId, {
+      $set: {
+        'usage.photosUploaded': creditedPhotos,
+        'usage.videosUploaded': creditedVideos
+      }
+    });
+  }
 
   const photoPercent = limits.photos > 0 ? (totalPhotosUsed / limits.photos) * 100 : 0;
   const videoPercent = limits.videos > 0 ? (totalVideosUsed / limits.videos) * 100 : 0;
@@ -99,6 +155,7 @@ export const getMyStudio = async (req: AuthRequest, res: Response) => {
         ownerId: req.user._id,
         subscriptionPlan: 'BASIC',
         subscriptionStatus: 'ACTIVE',
+        subscriptionStartDate: new Date(),
       });
     } else {
       // Check if user is STUDIO_OWNER in DB
@@ -110,7 +167,25 @@ export const getMyStudio = async (req: AuthRequest, res: Response) => {
       }
     }
 
-    const credits = await calculateStudioCredits(studio._id, studio.subscriptionPlan, studio);
+    const adminUser = isSuperAdmin(req.user);
+    if (adminUser) {
+      if (!studio) {
+        studio = await Studio.create({
+          name: 'Super Admin Studio',
+          ownerId: req.user._id,
+          subscriptionPlan: 'PREMIUM',
+          subscriptionStatus: 'ACTIVE',
+          subscriptionExpiresAt: new Date('2099-12-31'),
+        });
+      } else if (!studio.subscriptionPlan) {
+        studio.subscriptionPlan = 'PREMIUM';
+        studio.subscriptionStatus = 'ACTIVE';
+        studio.subscriptionExpiresAt = new Date('2099-12-31');
+        await studio.save();
+      }
+    }
+
+    const credits = await calculateStudioCredits(studio._id, studio.subscriptionPlan, studio, adminUser);
 
     return res.json({ studio, credits });
   } catch (err: any) {
@@ -126,11 +201,22 @@ export const getStudioCredits = async (req: AuthRequest, res: Response) => {
   try {
     if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
 
-    const studio = await Studio.findOne({ ownerId: req.user._id }).select('name subscriptionPlan usage').lean();
+    const adminUser = isSuperAdmin(req.user);
+    let studio: any = await Studio.findOne({ ownerId: req.user._id }).select('name subscriptionPlan usage subscriptionStartDate subscriptionExpiresAt').lean();
+    if (!studio && adminUser) {
+      const created = await Studio.create({
+        name: 'Super Admin Studio',
+        ownerId: req.user._id,
+        subscriptionPlan: 'PREMIUM',
+        subscriptionStatus: 'ACTIVE',
+        subscriptionExpiresAt: new Date('2099-12-31'),
+      });
+      studio = created.toObject();
+    }
     if (!studio) return res.status(404).json({ error: 'Studio profile not found' });
 
-    const credits = await calculateStudioCredits(studio._id, studio.subscriptionPlan, studio);
-    return res.json({ credits, studio: { name: studio.name, subscriptionPlan: studio.subscriptionPlan } });
+    const credits = await calculateStudioCredits(studio._id, studio.subscriptionPlan, studio, adminUser);
+    return res.json({ credits, studio: { name: studio.name, subscriptionPlan: studio.subscriptionPlan || (adminUser ? 'PREMIUM' : 'BASIC') } });
   } catch (err: any) {
     console.error('getStudioCredits error:', err);
     return res.status(500).json({ error: err.message });
@@ -237,36 +323,83 @@ export const uploadStudioLogo = async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: 'No logo image file uploaded' });
     }
 
-    const { uploadFile } = await import('../services/StorageService');
-    const { url } = await uploadFile(file.buffer, 'studios/logos');
+    // Validate MIME type
+    const validMimes = ['image/jpeg', 'image/png', 'image/webp', 'image/svg+xml'];
+    if (file.mimetype && !validMimes.includes(file.mimetype)) {
+      return res.status(400).json({ error: 'Invalid file format. Please upload JPG, PNG, WEBP, or SVG.' });
+    }
 
     let studio = await Studio.findOne({ ownerId: req.user._id });
     if (!studio) {
       studio = await Studio.create({
         name: (req.user.name || 'Mara') + ' Studio',
         ownerId: req.user._id,
-        logoUrl: url,
         subscriptionPlan: 'BASIC',
         subscriptionStatus: 'ACTIVE',
       });
-    } else {
-      studio.logoUrl = url;
-      if (!studio.watermark) {
-        studio.watermark = { type: 'NONE', opacity: 0.5, size: 50, position: 'BOTTOM_RIGHT' };
-      }
-      studio.watermark.logoUrl = url;
-      await studio.save();
     }
+
+    const { uploadFile, deleteFile } = await import('../services/StorageService');
+
+    // Store in structured R2 path: studios/{studioId}/logo/{filename}
+    const folder = `studios/${studio._id}/logo`;
+    const { url, publicId } = await uploadFile(file.buffer, folder, file.mimetype, file.originalname);
+
+    // If previous logo key exists and is different, cleanup old logo from R2
+    if (studio.logoKey && studio.logoKey !== publicId) {
+      deleteFile(studio.logoKey).catch((delErr) => console.warn('[Logo] Old logo cleanup notice:', delErr));
+    }
+
+    studio.logoUrl = url;
+    studio.logoKey = publicId;
+    if (!studio.watermark) {
+      studio.watermark = { type: 'NONE', opacity: 0.5, size: 50, position: 'BOTTOM_RIGHT' };
+    }
+    studio.watermark.logoUrl = url;
+    await studio.save();
 
     return res.status(200).json({
       success: true,
       message: 'Studio logo uploaded and saved successfully',
       logoUrl: url,
+      logoKey: publicId,
       studio,
     });
   } catch (err: any) {
     console.error('uploadStudioLogo error:', err);
     return res.status(500).json({ error: err.message || 'Failed to upload studio logo' });
+  }
+};
+
+/**
+ * Delete studio logo safely from Cloudflare R2 and MongoDB
+ */
+export const deleteStudioLogo = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const studio = await Studio.findOne({ ownerId: req.user._id });
+    if (!studio) return res.status(404).json({ error: 'Studio not found' });
+
+    if (studio.logoKey) {
+      const { deleteFile } = await import('../services/StorageService');
+      await deleteFile(studio.logoKey).catch((e) => console.warn('Could not delete old R2 logo:', e));
+    }
+
+    studio.logoUrl = undefined;
+    studio.logoKey = undefined;
+    if (studio.watermark) {
+      studio.watermark.logoUrl = undefined;
+    }
+    await studio.save();
+
+    return res.status(200).json({
+      success: true,
+      message: 'Studio logo removed successfully',
+      studio,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to remove studio logo' });
   }
 };
 
@@ -289,10 +422,14 @@ export const updateStudioPlan = async (req: AuthRequest, res: Response) => {
     const studio = await Studio.findOneAndUpdate(
       { ownerId: req.user._id },
       {
-        subscriptionPlan: planKey,
-        subscriptionStatus: 'ACTIVE',
-        subscriptionStartDate: startDate,
-        subscriptionExpiresAt: expiresAt,
+        $set: {
+          subscriptionPlan: planKey,
+          subscriptionStatus: 'ACTIVE',
+          subscriptionStartDate: startDate,
+          subscriptionExpiresAt: expiresAt,
+          'usage.photosUploaded': 0,
+          'usage.videosUploaded': 0,
+        }
       },
       { new: true, upsert: true }
     );

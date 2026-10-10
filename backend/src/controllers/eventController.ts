@@ -28,6 +28,7 @@ export const createEvent = async (req: AuthRequest, res: Response) => {
     password,
     assignedTeamEmails,
     addToPortfolio,
+    allowDownload,
     watermark,
   } = req.body;
 
@@ -48,11 +49,14 @@ export const createEvent = async (req: AuthRequest, res: Response) => {
     }
 
     // Generate unique code slug
-    let code = name.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-');
+    let baseSlug = (req.body.code || name || 'event').toLowerCase().trim().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+    if (!baseSlug) baseSlug = 'event';
+
+    let code = baseSlug;
     const existingCode = await Event.findOne({ code });
     if (existingCode) {
       // Append unique timestamp hash to guarantee uniqueness
-      code = `${code}-${Math.random().toString(36).substring(2, 6)}`;
+      code = `${baseSlug}-${Math.random().toString(36).substring(2, 6)}`;
     }
 
     let passwordHash = undefined;
@@ -92,6 +96,7 @@ export const createEvent = async (req: AuthRequest, res: Response) => {
       studioId: studio._id,
       assignedTeamMembers,
       addToPortfolio: addToPortfolio || false,
+      allowDownload: allowDownload !== undefined ? allowDownload : true,
       watermark: watermark || { isActive: false, type: 'LOGO', position: 'BOTTOM_RIGHT', width: 20, height: 20, opacity: 0.5 },
     });
 
@@ -176,6 +181,15 @@ export const getMyEvents = async (req: AuthRequest, res: Response) => {
           const daysLeft = diffDays <= 0 ? 30 : Math.max(0, 30 - diffDays);
           return { ...evObj, daysLeft, autoDeleteAt: new Date(baseMidnight + 30 * 24 * 60 * 60 * 1000) };
         });
+
+        // Sort: highest days remaining first (e.g. 30 -> 18 -> 13 -> 0), then newest created
+        enrichedEvents.sort((a, b) => {
+          if (b.daysLeft !== a.daysLeft) return b.daysLeft - a.daysLeft;
+          const timeA = new Date(a.createdAt || a.date || 0).getTime();
+          const timeB = new Date(b.createdAt || b.date || 0).getTime();
+          return timeB - timeA;
+        });
+
         return res.json({ events: enrichedEvents });
       }
       return res.json({ events: [] });
@@ -198,6 +212,14 @@ export const getMyEvents = async (req: AuthRequest, res: Response) => {
       return { ...evObj, daysLeft, autoDeleteAt: new Date(baseMidnight + 30 * 24 * 60 * 60 * 1000) };
     });
 
+    // Sort: highest days remaining first (e.g. 30 -> 18 -> 13 -> 0), then newest created
+    enrichedEvents.sort((a, b) => {
+      if (b.daysLeft !== a.daysLeft) return b.daysLeft - a.daysLeft;
+      const timeA = new Date(a.createdAt || a.date || 0).getTime();
+      const timeB = new Date(b.createdAt || b.date || 0).getTime();
+      return timeB - timeA;
+    });
+
     return res.json({ events: enrichedEvents });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
@@ -211,8 +233,15 @@ export const getEventByCode = async (req: Request, res: Response) => {
   const { code } = req.params;
 
   try {
-    const event = await Event.findOne({ code })
-      .populate('studioId', 'name logoUrl watermark customDomain instagramUrl facebookUrl');
+    let event = null;
+    if (code.match(/^[0-9a-fA-F]{24}$/)) {
+      event = await Event.findById(code)
+        .populate('studioId', 'name logoUrl watermark customDomain instagramUrl facebookUrl');
+    }
+    if (!event) {
+      event = await Event.findOne({ code })
+        .populate('studioId', 'name logoUrl watermark customDomain instagramUrl facebookUrl');
+    }
     
     if (!event) {
       return res.status(404).json({ error: 'Event gallery not found' });
@@ -221,6 +250,11 @@ export const getEventByCode = async (req: Request, res: Response) => {
     // Redact passwordHash before sending
     const eventObj = event.toObject();
     delete eventObj.passwordHash;
+
+    if (event.accessType !== 'PASSWORD' && event.accessType !== 'OTP') {
+      const media = await Media.find({ eventId: event._id }).sort({ createdAt: -1 });
+      return res.json({ event: eventObj, media });
+    }
 
     return res.json({ event: eventObj });
   } catch (err: any) {
@@ -311,6 +345,7 @@ export const updateEvent = async (req: AuthRequest, res: Response) => {
     password,
     watermark,
     addToPortfolio,
+    allowDownload,
   } = req.body;
 
   try {
@@ -339,7 +374,32 @@ export const updateEvent = async (req: AuthRequest, res: Response) => {
       }
     }
 
-    if (name) event.name = name;
+    const requestedCode = req.body.code
+      ? req.body.code.toLowerCase().trim().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '')
+      : null;
+
+    if (requestedCode && requestedCode !== event.code) {
+      // User explicitly changed or specified the URL slug
+      let candidate = requestedCode;
+      const existing = await Event.findOne({ code: candidate, _id: { $ne: event._id } });
+      if (existing) {
+        candidate = `${requestedCode}-${Math.random().toString(36).substring(2, 6)}`;
+      }
+      event.code = candidate;
+    } else if (name && name.trim() && name.trim() !== event.name) {
+      // Event name changed, automatically update the URL slug to match the new event name
+      const nameSlug = name.toLowerCase().trim().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+      if (nameSlug && nameSlug !== event.code) {
+        let candidate = nameSlug;
+        const existing = await Event.findOne({ code: candidate, _id: { $ne: event._id } });
+        if (existing) {
+          candidate = `${nameSlug}-${Math.random().toString(36).substring(2, 6)}`;
+        }
+        event.code = candidate;
+      }
+    }
+
+    if (name && name.trim()) event.name = name.trim();
     if (clientName) event.clientName = clientName;
     if (clientMobile) event.clientMobile = clientMobile;
     if (clientEmail) event.clientEmail = clientEmail;
@@ -353,6 +413,7 @@ export const updateEvent = async (req: AuthRequest, res: Response) => {
     if (totalDays !== undefined) event.totalDays = totalDays;
     if (days !== undefined) event.days = days;
     if (addToPortfolio !== undefined) event.addToPortfolio = addToPortfolio;
+    if (allowDownload !== undefined) event.allowDownload = allowDownload;
 
     if (accessType) {
       event.accessType = accessType;
@@ -555,3 +616,48 @@ export const updatePortfolioStatus = async (req: AuthRequest, res: Response) => 
     return res.status(500).json({ error: err.message });
   }
 };
+
+/**
+ * Update event download permission status instantly
+ */
+export const updateDownloadStatus = async (req: AuthRequest, res: Response) => {
+  const { eventId } = req.params;
+  const { allowDownload } = req.body;
+
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+    let event;
+    if (eventId.match(/^[0-9a-fA-F]{24}$/)) {
+      event = await Event.findById(eventId);
+    } else {
+      event = await Event.findOne({ code: eventId });
+    }
+    
+    if (!event) return res.status(404).json({ error: 'Event not found' });
+
+    const studio = await Studio.findOne({ ownerId: req.user._id });
+    if (!studio && !isSuperAdmin(req.user)) {
+      if (req.user.role === 'TEAM_MEMBER') {
+        const isAssigned = event.assignedTeamMembers.some(
+          (tmId) => tmId.toString() === req.user?._id.toString()
+        );
+        if (!isAssigned) {
+          return res.status(403).json({ error: 'Unauthorized to update this event' });
+        }
+      } else {
+        return res.status(403).json({ error: 'Unauthorized to update this event' });
+      }
+    }
+
+    if (allowDownload !== undefined) {
+      event.allowDownload = allowDownload;
+      await event.save();
+    }
+
+    return res.json({ message: 'Download status updated successfully', event });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+};
+

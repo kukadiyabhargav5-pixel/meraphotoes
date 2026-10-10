@@ -8,7 +8,7 @@ import sharp from 'sharp';
 import ffmpeg from 'fluent-ffmpeg';
 import dotenv from 'dotenv';
 import { redisConfig } from '../config/redis';
-import { uploadFile } from '../services/StorageService';
+import { uploadFile, getFileBuffer } from '../services/StorageService';
 import { Media, FaceEmbedding, Studio, Event } from '../models';
 import { insertFaceEmbedding, isQdrantAvailable } from '../services/qdrantService';
 
@@ -273,7 +273,16 @@ export const processPhoto = async (mediaId: string, studioId: string) => {
   await Media.findByIdAndUpdate(mediaId, { processedStatus: 'PROCESSING' });
 
   try {
-    const originalBuffer = await downloadUrlToBuffer(media.r2Url);
+    let originalBuffer: Buffer;
+    if (media.r2Key) {
+      try {
+        originalBuffer = await getFileBuffer(media.r2Key);
+      } catch {
+        originalBuffer = await downloadUrlToBuffer(media.r2Url);
+      }
+    } else {
+      originalBuffer = await downloadUrlToBuffer(media.r2Url);
+    }
     const metadata = await sharp(originalBuffer).metadata();
     const width = metadata.width || 0;
     const height = metadata.height || 0;
@@ -304,60 +313,70 @@ export const processPhoto = async (mediaId: string, studioId: string) => {
     const fileBlob = new Blob([new Uint8Array(originalBuffer)], { type: 'image/jpeg' });
     formData.append('file', fileBlob, 'image.jpg');
 
-    let faces = [];
-    let faceIndexStatus: 'INDEXED' | 'NO_FACE' | 'FAILED' = 'NO_FACE';
-    const candidateUrls = getCandidateAiUrls();
-    let lastAiErr: any = null;
+    let faces: any[] = [];
+    let faceIndexStatus: 'INDEXED' | 'NO_FACE' | 'FAILED' = media.faceIndexStatus === 'INDEXED' ? 'INDEXED' : 'NO_FACE';
 
-    for (const baseUrl of candidateUrls) {
-      try {
-        const aiResponse = await axios.post(`${baseUrl}/detect-faces`, formData, {
-          headers: { 'Content-Type': 'multipart/form-data', 'bypass-tunnel-reminder': 'true' },
-          timeout: 60000,
-        });
-        if (aiResponse.data && Array.isArray(aiResponse.data.faces)) {
-          faces = aiResponse.data.faces;
-          faceIndexStatus = faces.length > 0 ? 'INDEXED' : 'NO_FACE';
-          lastAiErr = null;
-          break;
+    if (media.faceIndexStatus === 'INDEXED') {
+      console.log(`[MediaWorker] Photo ${mediaId} is already indexed. Skipping redundant AI processing.`);
+    } else {
+      const formData = new FormData();
+      // Send original image to AI service for best face detection
+      const fileBlob = new Blob([new Uint8Array(originalBuffer)], { type: 'image/jpeg' });
+      formData.append('file', fileBlob, 'image.jpg');
+
+      const candidateUrls = getCandidateAiUrls();
+      let lastAiErr: any = null;
+
+      for (const baseUrl of candidateUrls) {
+        try {
+          const aiResponse = await axios.post(`${baseUrl}/detect-faces`, formData, {
+            headers: { 'Content-Type': 'multipart/form-data', 'bypass-tunnel-reminder': 'true' },
+            timeout: 60000,
+          });
+          if (aiResponse.data && Array.isArray(aiResponse.data.faces)) {
+            faces = aiResponse.data.faces;
+            faceIndexStatus = faces.length > 0 ? 'INDEXED' : 'NO_FACE';
+            lastAiErr = null;
+            break;
+          }
+        } catch (aiErr: any) {
+          lastAiErr = aiErr;
+          console.warn(`[AI Warning]: Face detection failed on ${baseUrl}:`, aiErr.message);
         }
-      } catch (aiErr: any) {
-        lastAiErr = aiErr;
-        console.warn(`[AI Warning]: Face detection failed on ${baseUrl}:`, aiErr.message);
       }
-    }
 
-    if (lastAiErr && faces.length === 0) {
-      faceIndexStatus = 'FAILED';
-    }
-    console.log(`Detected ${faces.length} faces in photo ${mediaId}`);
+      if (lastAiErr && faces.length === 0) {
+        faceIndexStatus = 'FAILED';
+      }
+      console.log(`Detected ${faces.length} faces in photo ${mediaId}`);
 
-    for (const face of faces) {
-      const faceDoc = await FaceEmbedding.create({
-        mediaId: media._id,
-        eventId: media.eventId,
-        studioId: media.studioId,
-        embedding: face.embedding,
-        bbox: face.bbox,
-        faceThumbnailUrl: `data:image/jpeg;base64,${face.thumbnail}`,
-        detectionConfidence: face.det_score || 0,
-        faceQuality: face.quality || 0,
-        modelVersion: 'buffalo_l_v1',
-        imageWidth: width,
-        imageHeight: height,
-      });
-      
-      try {
-        if (await isQdrantAvailable()) {
-          await insertFaceEmbedding(
-            media.eventId.toString(),
-            media._id.toString(),
-            face.embedding,
-            faceDoc._id.toString()
-          );
+      for (const face of faces) {
+        const faceDoc = await FaceEmbedding.create({
+          mediaId: media._id,
+          eventId: media.eventId,
+          studioId: media.studioId,
+          embedding: face.embedding,
+          bbox: face.bbox,
+          faceThumbnailUrl: `data:image/jpeg;base64,${face.thumbnail}`,
+          detectionConfidence: face.det_score || 0,
+          faceQuality: face.quality || 0,
+          modelVersion: 'buffalo_l_v1',
+          imageWidth: width,
+          imageHeight: height,
+        });
+        
+        try {
+          if (await isQdrantAvailable()) {
+            await insertFaceEmbedding(
+              media.eventId.toString(),
+              media._id.toString(),
+              face.embedding,
+              faceDoc._id.toString()
+            );
+          }
+        } catch (qErr) {
+          console.warn(`[Qdrant] Failed to insert face embedding for photo ${mediaId}:`, qErr);
         }
-      } catch (qErr) {
-        console.warn(`[Qdrant] Failed to insert face embedding for photo ${mediaId}:`, qErr);
       }
     }
 
@@ -410,7 +429,16 @@ export const processVideo = async (mediaId: string, studioId: string) => {
   }
 
   try {
-    const originalBuffer = await downloadUrlToBuffer(media.r2Url);
+    let originalBuffer: Buffer;
+    if (media.r2Key) {
+      try {
+        originalBuffer = await getFileBuffer(media.r2Key);
+      } catch {
+        originalBuffer = await downloadUrlToBuffer(media.r2Url);
+      }
+    } else {
+      originalBuffer = await downloadUrlToBuffer(media.r2Url);
+    }
     fs.writeFileSync(tempVideoPath, originalBuffer);
 
     try {
@@ -534,8 +562,8 @@ export const processVideo = async (mediaId: string, studioId: string) => {
 
       // Compress if the video exceeds 18MB, or optimize for web streaming
       if (originalBuffer.length > TARGET_MAX_BYTES) {
-        const safeDuration = Math.max(duration || 0, 5); // Minimum 5s
-        const totalTargetBits = TARGET_MAX_BYTES * 8; // ~150,994,944 bits
+        const safeDuration = (duration && duration > 0) ? duration : Math.max(30, Math.floor(originalBuffer.length / (1024 * 1024 * 1.5)));
+        const totalTargetBits = TARGET_MAX_BYTES * 8; // ~150,994,944 bits (18MB max)
         const audioBitrateBps = 128 * 1000; // 128 kbps audio
         const totalAudioBits = audioBitrateBps * safeDuration;
         const availableVideoBits = Math.max(totalTargetBits - totalAudioBits, totalTargetBits * 0.85);

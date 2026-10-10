@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { registerStudioOwner, login, requestOTP, verifyOTP, refreshToken, forgotPasswordRequestOTP, verifyResetOTP, resetPassword, getMe, logout, checkEmail, googleLogin } from '../controllers/authController';
+import { registerStudioOwner, login, requestOTP, verifyOTP, refreshToken, forgotPasswordRequestOTP, verifyResetOTP, resetPassword, getMe, logout, checkEmail, googleLogin, updateProfile } from '../controllers/authController';
 import { authenticateJWT } from '../middlewares/auth';
 
 const router = Router();
@@ -8,6 +8,7 @@ router.post('/register', registerStudioOwner);
 router.post('/login', login);
 router.post('/google', googleLogin);
 router.get('/me', authenticateJWT, getMe);
+router.put('/update-profile', authenticateJWT, updateProfile);
 router.post('/logout', authenticateJWT, logout);
 router.get('/check-email', checkEmail);
 router.post('/request-otp', requestOTP);
@@ -18,3 +19,4 @@ router.post('/verify-reset-otp', verifyResetOTP);
 router.post('/reset-password', resetPassword);
 
 export default router;
+

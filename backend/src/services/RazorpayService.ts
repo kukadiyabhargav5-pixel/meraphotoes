@@ -10,10 +10,13 @@ const razorpay = new Razorpay({
 });
 
 export const PLAN_PRICES: Record<string, number> = {
-  BASIC: 3500,
-  STANDARD: 7900,
-  ESSENTIAL: 15900,
-  PREMIUM: 31900,
+  BASIC: 0,
+  STARTUP: 3999,
+  STARTER: 3999,
+  STANDARD: 7999,
+  ESSENTIAL: 12999,
+  PREMIUM: 19999,
+  ENTERPRISE: 19999,
 };
 
 /**

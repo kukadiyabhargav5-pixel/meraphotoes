@@ -24,12 +24,13 @@ export interface IPaymentDetails {
 export interface IStudio extends Document {
   name: string;
   logoUrl?: string;
+  logoKey?: string;
   customDomain?: string; // e.g. "gallery.dreamstudio.com"
   instagramUrl?: string;
   facebookUrl?: string;
   ownerId: mongoose.Types.ObjectId;
   watermark: IWatermarkSettings;
-  subscriptionPlan: 'BASIC' | 'STANDARD' | 'ESSENTIAL' | 'PREMIUM' | 'STARTER' | 'PROFESSIONAL' | 'BUSINESS' | 'ENTERPRISE';
+  subscriptionPlan: 'BASIC' | 'STARTUP' | 'STANDARD' | 'ESSENTIAL' | 'PREMIUM' | 'STARTER' | 'PROFESSIONAL' | 'BUSINESS' | 'ENTERPRISE';
   subscriptionStatus: 'ACTIVE' | 'PAST_DUE' | 'CANCELLED' | 'TRIALING' | 'FREE';
   subscriptionStartDate?: Date;
   subscriptionExpiresAt?: Date;
@@ -44,11 +45,12 @@ export interface IStudio extends Document {
 const StudioSchema = new Schema<IStudio>({
   name: { type: String, required: true },
   logoUrl: { type: String },
+  logoKey: { type: String },
   branding: { type: Schema.Types.Mixed },
   customDomain: { type: String, unique: true, sparse: true, lowercase: true, trim: true },
   instagramUrl: { type: String },
   facebookUrl: { type: String },
-  ownerId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+  ownerId: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
   watermark: {
     type: { type: String, enum: ['TEXT', 'LOGO', 'NONE'], default: 'NONE' },
     text: { type: String, default: 'Mara Photo' },
@@ -63,7 +65,7 @@ const StudioSchema = new Schema<IStudio>({
   },
   subscriptionPlan: { 
     type: String, 
-    enum: ['BASIC', 'STANDARD', 'ESSENTIAL', 'PREMIUM', 'STARTER', 'PROFESSIONAL', 'BUSINESS', 'ENTERPRISE'], 
+    enum: ['BASIC', 'STARTUP', 'STANDARD', 'ESSENTIAL', 'PREMIUM', 'STARTER', 'PROFESSIONAL', 'BUSINESS', 'ENTERPRISE'], 
     default: 'BASIC' 
   },
   subscriptionStatus: { 

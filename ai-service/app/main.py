@@ -25,7 +25,7 @@ async def init_engine_background():
     """Load FaceEngine asynchronously in background thread so port binds instantly."""
     global engine, is_engine_loading
     is_engine_loading = True
-    model_name = os.environ.get("INSIGHTFACE_MODEL", "buffalo_sc")
+    model_name = os.environ.get("INSIGHTFACE_MODEL", "buffalo_l")
     print(f"[AI Service] Background initialization of InsightFace ({model_name}) started...")
     try:
         loop = asyncio.get_running_loop()
@@ -83,7 +83,7 @@ async def get_engine() -> FaceEngine:
 
 @app.get("/health")
 def health():
-    model_name = os.environ.get("INSIGHTFACE_MODEL", "buffalo_sc")
+    model_name = os.environ.get("INSIGHTFACE_MODEL", "buffalo_l")
     return {
         "status": "healthy",
         "model": model_name,

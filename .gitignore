@@ -8,3 +8,14 @@ __pycache__/
 *.pyc
 
 venv/
+insightface-runpod/
+backend/backend/
+backend/frontend/
+frontend/backend/
+frontend/frontend/
+frontend/ai-service/
+backend/mongo_log.txt
+backend/start_*.bat
+frontend/start_*.bat
+*.bat
+mongo_log.txt

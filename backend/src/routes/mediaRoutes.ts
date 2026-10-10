@@ -1,20 +1,40 @@
 import { Router } from 'express';
-import { uploadMedia, getEventMedia, downloadBulkMedia, deleteMedia, uploadAsset, deleteBulkMedia, bulkCreateMedia, getImageKitAuth } from '../controllers/mediaController';
+import {
+  uploadMedia,
+  getEventMedia,
+  downloadBulkMedia,
+  deleteMedia,
+  uploadAsset,
+  deleteBulkMedia,
+  bulkCreateMedia,
+  getImageKitAuth,
+  getPresignedUploadUrls,
+  streamMediaFile,
+} from '../controllers/mediaController';
 import { authenticateJWT } from '../middlewares/auth';
 import { upload } from '../middlewares/upload';
 
 const router = Router();
 
+// Stream media directly from Cloudflare R2 with HTTP caching & video range support
+router.get('/file/:key(*)', streamMediaFile);
+
+// Generate presigned upload URLs for ultra-fast direct client-to-R2 uploads
+router.post('/event/:eventId/presigned-urls', authenticateJWT, getPresignedUploadUrls);
+
+// Bulk create media records after direct client upload
+router.post('/event/:eventId/bulk-create', authenticateJWT, bulkCreateMedia);
+
 // Upload single whitelabel asset (logo, watermark, cover) to R2
 router.post('/upload-asset', authenticateJWT, upload.single('file'), uploadAsset);
 
-// Upload multiple photo/video files for a specific event
+// Upload multiple photo/video files for a specific event (backend upload / fallback)
 router.post('/event/:eventId/upload', authenticateJWT, upload.any(), uploadMedia);
 
 // Get all processed media for a specific event (public or studio dashboard view)
 router.get('/event/:eventId', getEventMedia);
 
-// Bulk download requested media items
+// Bulk download requested media items (with presigned R2 direct download URLs)
 router.post('/download-bulk', downloadBulkMedia);
 
 // Delete an item of media
@@ -22,10 +42,8 @@ router.delete('/:mediaId', authenticateJWT, deleteMedia);
 
 // Bulk delete media for an event
 router.delete('/event/:eventId/media', authenticateJWT, deleteBulkMedia);
-// Bulk create media from direct client Cloudinary uploads
-router.post('/event/:eventId/bulk-create', authenticateJWT, bulkCreateMedia);
 
-// Get ImageKit upload signature
+// Legacy auth signature route (backward compatibility)
 router.get('/imagekit-auth', authenticateJWT, getImageKitAuth);
 
 export default router;
