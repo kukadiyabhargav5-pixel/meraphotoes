@@ -10,6 +10,7 @@ import {
   getImageKitAuth,
   getPresignedUploadUrls,
   streamMediaFile,
+  downloadEventZip,
 } from '../controllers/mediaController';
 import { authenticateJWT } from '../middlewares/auth';
 import { upload } from '../middlewares/upload';
@@ -18,6 +19,10 @@ const router = Router();
 
 // Stream media directly from Cloudflare R2 with HTTP caching & video range support
 router.get('/file/:key(*)', streamMediaFile);
+
+// Stream full event or selected photos directly as a ZIP archive
+router.get('/download-zip', downloadEventZip);
+router.post('/download-zip', downloadEventZip);
 
 // Generate presigned upload URLs for ultra-fast direct client-to-R2 uploads
 router.post('/event/:eventId/presigned-urls', authenticateJWT, getPresignedUploadUrls);

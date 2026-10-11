@@ -14,6 +14,7 @@ import {
   generatePresignedDownloadUrl,
   getFileUrl,
   generateSignature,
+  getObjectStream,
 } from '../services/StorageService';
 import { photoQueue, videoQueue, processMediaLocal, isRedisAvailable } from '../workers/mediaWorker';
 import sharp from 'sharp';
@@ -330,15 +331,16 @@ export const getEventMedia = async (req: Request, res: Response) => {
       query.type = type;
     }
 
-    const mediaList = await Media.find(query).sort({ createdAt: -1 });
-    const sanitizedMedia = mediaList.map((m) => {
-      const doc: any = m.toObject();
+    const mediaList = await Media.find(query).sort({ createdAt: -1 }).lean();
+    const sanitizedMedia = mediaList.map((doc: any) => {
       if (doc.r2Url) doc.r2Url = getFileUrl(doc.r2Url);
       if (doc.compressedUrl) doc.compressedUrl = getFileUrl(doc.compressedUrl);
       if (doc.thumbnailUrl) doc.thumbnailUrl = getFileUrl(doc.thumbnailUrl);
       return doc;
     });
 
+    // Cache gallery media for 60 seconds with stale-while-revalidate for blazing fast speed
+    res.setHeader('Cache-Control', 'public, max-age=30, stale-while-revalidate=120');
     return res.json({ media: sanitizedMedia });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
@@ -373,6 +375,99 @@ export const downloadBulkMedia = async (req: Request, res: Response) => {
     return res.json({ downloads: downloadLinks });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
+  }
+};
+
+/**
+ * Streams all requested media or an entire event's media directly into a single ZIP archive.
+ */
+export const downloadEventZip = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const archiver = require('archiver');
+    const { mediaIds, slug, eventId } = { ...req.query, ...req.body } as any;
+
+    let targetEvent: any = null;
+    if (eventId && typeof eventId === 'string' && eventId.match(/^[0-9a-fA-F]{24}$/)) {
+      targetEvent = await Event.findById(eventId);
+    } else if (slug) {
+      targetEvent = await Event.findOne({ code: slug });
+    }
+
+    let mediaQuery: any = {};
+    if (Array.isArray(mediaIds) && mediaIds.length > 0) {
+      mediaQuery._id = { $in: mediaIds };
+    } else if (typeof mediaIds === 'string' && mediaIds.trim()) {
+      const ids = mediaIds.split(',').map((id: string) => id.trim()).filter((id: string) => id.match(/^[0-9a-fA-F]{24}$/));
+      if (ids.length > 0) mediaQuery._id = { $in: ids };
+    }
+
+    if (!mediaQuery._id && targetEvent) {
+      mediaQuery.eventId = targetEvent._id;
+    }
+
+    if (!mediaQuery._id && !mediaQuery.eventId) {
+      res.status(400).json({ error: 'Please specify eventId, slug, or mediaIds' });
+      return;
+    }
+
+    const items = await Media.find(mediaQuery).sort({ createdAt: 1 });
+    if (!items || items.length === 0) {
+      res.status(404).json({ error: 'No media items found to download.' });
+      return;
+    }
+
+    const eventName = targetEvent?.name || 'Mara_Photo';
+    const safeEventName = eventName.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const zipFileName = `${safeEventName}_Media.zip`;
+
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${zipFileName}"`);
+    res.setHeader('X-Total-Count', items.length.toString());
+
+    const createZipStream = (options: any) => {
+      if (typeof archiver === 'function') return archiver('zip', options);
+      if (archiver.ZipArchive) return new archiver.ZipArchive(options);
+      if (archiver.default && typeof archiver.default === 'function') return archiver.default('zip', options);
+      if (archiver.default?.ZipArchive) return new archiver.default.ZipArchive(options);
+      return new (archiver as any).ZipArchive(options);
+    };
+
+    const archive = createZipStream({ zlib: { level: 0 } });
+
+    archive.on('warning', (err: any) => {
+      console.warn('[ZIP Download Warning]:', err?.message || err);
+    });
+
+    archive.on('error', (err: any) => {
+      console.error('[ZIP Download Error]:', err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Failed to generate ZIP archive.' });
+      }
+    });
+
+    archive.pipe(res);
+
+    for (let i = 0; i < items.length; i++) {
+      const media = items[i];
+      const key = media.r2Key;
+      if (!key) continue;
+
+      try {
+        const fileStream = await getObjectStream(key);
+        const ext = media.type === 'VIDEO' ? '.mp4' : key.endsWith('.png') ? '.png' : key.endsWith('.webp') ? '.webp' : '.jpg';
+        const entryName = `media_${String(i + 1).padStart(3, '0')}${ext}`;
+        archive.append(fileStream as any, { name: entryName });
+      } catch (streamErr: any) {
+        console.warn(`[ZIP Download] Failed to append media ${media._id}:`, streamErr?.message || streamErr);
+      }
+    }
+
+    await archive.finalize();
+  } catch (error: any) {
+    console.error('[downloadEventZip Error]:', error);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Failed to create zip archive' });
+    }
   }
 };
 
