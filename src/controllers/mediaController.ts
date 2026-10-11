@@ -362,6 +362,10 @@ export const downloadBulkMedia = async (req: Request, res: Response) => {
     for (const id of mediaIds) {
       const media = await Media.findById(id);
       if (media && media.processedStatus === 'COMPLETED') {
+        const event = await Event.findById(media.eventId).select('allowDownload');
+        if (event && event.allowDownload === false) {
+          return res.status(403).json({ error: 'Photo downloads have been disabled by the studio for this album.' });
+        }
         const filename = media.r2Key.split('/').pop() || 'photo.jpg';
         const downloadUrl = await generatePresignedDownloadUrl(media.r2Key, filename);
         downloadLinks.push({
@@ -413,6 +417,15 @@ export const downloadEventZip = async (req: Request, res: Response): Promise<voi
     const items = await Media.find(mediaQuery).sort({ createdAt: 1 });
     if (!items || items.length === 0) {
       res.status(404).json({ error: 'No media items found to download.' });
+      return;
+    }
+
+    if (!targetEvent && items.length > 0 && items[0].eventId) {
+      targetEvent = await Event.findById(items[0].eventId);
+    }
+
+    if (targetEvent && targetEvent.allowDownload === false) {
+      res.status(403).json({ error: 'Photo downloads have been disabled by the studio for this album.' });
       return;
     }
 
