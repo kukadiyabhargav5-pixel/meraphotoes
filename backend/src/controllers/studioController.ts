@@ -1,9 +1,10 @@
 import { Response } from 'express';
 import { AuthRequest, isSuperAdmin } from '../middlewares/auth';
 import { Studio, User, Media } from '../models';
+import { getFileUrl } from '../services/StorageService';
 
 export const PLAN_STORAGE_LIMITS: Record<string, { photos: number; videos: number; name: string }> = {
-  BASIC: { photos: 0, videos: 0, name: 'Basic Free' },
+  BASIC: { photos: 5000, videos: 50, name: 'Basic Free' },
   STARTUP: { photos: 50000, videos: 10, name: 'Startup' },
   STARTER: { photos: 50000, videos: 10, name: 'Startup' },
   STANDARD: { photos: 100000, videos: 20, name: 'Standard' },
@@ -187,7 +188,15 @@ export const getMyStudio = async (req: AuthRequest, res: Response) => {
 
     const credits = await calculateStudioCredits(studio._id, studio.subscriptionPlan, studio, adminUser);
 
-    return res.json({ studio, credits });
+    const studioObj = studio.toObject ? studio.toObject() : { ...studio };
+    if (studioObj.logoUrl) {
+      studioObj.logoUrl = getFileUrl(studioObj.logoUrl);
+    }
+    if (studioObj.watermark && studioObj.watermark.logoUrl) {
+      studioObj.watermark.logoUrl = getFileUrl(studioObj.watermark.logoUrl);
+    }
+
+    return res.json({ studio: studioObj, credits });
   } catch (err: any) {
     console.error('getMyStudio error:', err);
     return res.status(500).json({ error: err.message });

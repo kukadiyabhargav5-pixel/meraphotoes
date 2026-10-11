@@ -11,6 +11,7 @@ import { redisConfig } from '../config/redis';
 import { uploadFile, getFileBuffer } from '../services/StorageService';
 import { Media, FaceEmbedding, Studio, Event } from '../models';
 import { insertFaceEmbedding, isQdrantAvailable } from '../services/qdrantService';
+import FormData from 'form-data';
 
 dotenv.config();
 
@@ -307,30 +308,25 @@ export const processPhoto = async (mediaId: string, studioId: string) => {
     const thumbFolder = `events/${media.eventId}/photos/thumb`;
     const { url: thumbnailUrl } = await uploadFile(thumbnailImage, thumbFolder);
 
-    const formData = new FormData();
-    // CRITICAL: Send ORIGINAL high-res image to AI service for best face detection
-    // Previously sent the watermarked 1600px gallery image which missed small/covered faces
-    const fileBlob = new Blob([new Uint8Array(originalBuffer)], { type: 'image/jpeg' });
-    formData.append('file', fileBlob, 'image.jpg');
-
     let faces: any[] = [];
     let faceIndexStatus: 'INDEXED' | 'NO_FACE' | 'FAILED' = media.faceIndexStatus === 'INDEXED' ? 'INDEXED' : 'NO_FACE';
 
     if (media.faceIndexStatus === 'INDEXED') {
       console.log(`[MediaWorker] Photo ${mediaId} is already indexed. Skipping redundant AI processing.`);
     } else {
-      const formData = new FormData();
-      // Send original image to AI service for best face detection
-      const fileBlob = new Blob([new Uint8Array(originalBuffer)], { type: 'image/jpeg' });
-      formData.append('file', fileBlob, 'image.jpg');
-
       const candidateUrls = getCandidateAiUrls();
       let lastAiErr: any = null;
 
       for (const baseUrl of candidateUrls) {
         try {
+          const formData = new FormData();
+          formData.append('file', originalBuffer, {
+            filename: 'photo.jpg',
+            contentType: 'image/jpeg',
+          });
+
           const aiResponse = await axios.post(`${baseUrl}/detect-faces`, formData, {
-            headers: { 'Content-Type': 'multipart/form-data', 'bypass-tunnel-reminder': 'true' },
+            headers: { ...formData.getHeaders(), 'bypass-tunnel-reminder': 'true' },
             timeout: 60000,
           });
           if (aiResponse.data && Array.isArray(aiResponse.data.faces)) {
@@ -351,16 +347,24 @@ export const processPhoto = async (mediaId: string, studioId: string) => {
       console.log(`Detected ${faces.length} faces in photo ${mediaId}`);
 
       for (const face of faces) {
+        const rawEmb: number[] = face.embedding || [];
+        let sumSq = 0;
+        for (const v of rawEmb) sumSq += v * v;
+        const norm = Math.sqrt(sumSq);
+        const normalizedEmb = (norm > 0 && Math.abs(norm - 1.0) > 0.01)
+          ? rawEmb.map((v: number) => v / norm)
+          : rawEmb;
+
         const faceDoc = await FaceEmbedding.create({
           mediaId: media._id,
           eventId: media.eventId,
           studioId: media.studioId,
-          embedding: face.embedding,
+          embedding: normalizedEmb,
           bbox: face.bbox,
           faceThumbnailUrl: `data:image/jpeg;base64,${face.thumbnail}`,
           detectionConfidence: face.det_score || 0,
           faceQuality: face.quality || 0,
-          modelVersion: 'buffalo_l_v1',
+          modelVersion: 'buffalo_l_v1_normalized',
           imageWidth: width,
           imageHeight: height,
         });
@@ -370,7 +374,7 @@ export const processPhoto = async (mediaId: string, studioId: string) => {
             await insertFaceEmbedding(
               media.eventId.toString(),
               media._id.toString(),
-              face.embedding,
+              normalizedEmb,
               faceDoc._id.toString()
             );
           }
@@ -479,41 +483,59 @@ export const processVideo = async (mediaId: string, studioId: string) => {
         const frameFile = frameFiles[i];
         const framePath = path.join(framesDir, frameFile);
         const timestamp = i * 2 + 1;
-
         const frameBuffer = fs.readFileSync(framePath);
 
-        const formData = new FormData();
-        const fileBlob = new Blob([new Uint8Array(frameBuffer)], { type: 'image/jpeg' });
-        formData.append('file', fileBlob, 'frame.jpg');
-
         try {
-          const aiResponse = await axios.post(`${AI_SERVICE_URL}/detect-faces`, formData, {
-            headers: { 'Content-Type': 'multipart/form-data', 'bypass-tunnel-reminder': 'true' },
-          });
-
-          const faces = aiResponse.data?.faces || [];
-          for (const face of faces) {
-            const faceDoc = await FaceEmbedding.create({
-              mediaId: media._id,
-              eventId: media.eventId,
-              studioId: media.studioId,
-              embedding: face.embedding,
-              bbox: face.bbox,
-              faceThumbnailUrl: `data:image/jpeg;base64,${face.thumbnail}`,
-              timestamp,
-            });
-            
+          const candidateUrls = getCandidateAiUrls();
+          for (const baseUrl of candidateUrls) {
             try {
-              if (await isQdrantAvailable()) {
-                await insertFaceEmbedding(
-                  media.eventId.toString(),
-                  media._id.toString(),
-                  face.embedding,
-                  faceDoc._id.toString()
-                );
+              const formData = new FormData();
+              formData.append('file', frameBuffer, {
+                filename: 'frame.jpg',
+                contentType: 'image/jpeg',
+              });
+
+              const aiResponse = await axios.post(`${baseUrl}/detect-faces`, formData, {
+                headers: { ...formData.getHeaders(), 'bypass-tunnel-reminder': 'true' },
+                timeout: 30000,
+              });
+
+              const faces = aiResponse.data?.faces || [];
+              for (const face of faces) {
+                const rawEmb: number[] = face.embedding || [];
+                let sumSq = 0;
+                for (const v of rawEmb) sumSq += v * v;
+                const norm = Math.sqrt(sumSq);
+                const normalizedEmb = (norm > 0 && Math.abs(norm - 1.0) > 0.01)
+                  ? rawEmb.map((v: number) => v / norm)
+                  : rawEmb;
+
+                const faceDoc = await FaceEmbedding.create({
+                  mediaId: media._id,
+                  eventId: media.eventId,
+                  studioId: media.studioId,
+                  embedding: normalizedEmb,
+                  bbox: face.bbox,
+                  faceThumbnailUrl: `data:image/jpeg;base64,${face.thumbnail}`,
+                  timestamp,
+                });
+                
+                try {
+                  if (await isQdrantAvailable()) {
+                    await insertFaceEmbedding(
+                      media.eventId.toString(),
+                      media._id.toString(),
+                      normalizedEmb,
+                      faceDoc._id.toString()
+                    );
+                  }
+                } catch (qErr) {
+                  console.warn(`[Qdrant] Failed to insert video face embedding for ${mediaId}:`, qErr);
+                }
               }
-            } catch (qErr) {
-              console.warn(`[Qdrant] Failed to insert video face embedding for ${mediaId}:`, qErr);
+              break;
+            } catch (frameAiErr) {
+              // Try next candidate URL
             }
           }
         } catch (aiErr) {

@@ -31,17 +31,30 @@ export const R2_BUCKET = process.env.R2_BUCKET_NAME || 'maraphoto';
  */
 export const getFileUrl = (key: string): string => {
   if (!key) return '';
-  // If key is already a full URL, return it
+  const prodApi = (
+    process.env.API_URL ||
+    process.env.RENDER_EXTERNAL_URL ||
+    (process.env.NODE_ENV === 'production' ? 'https://meraphotoes.onrender.com' : 'http://localhost:5000')
+  ).replace(/\/+$/, '');
+
+  // If key is already a full URL, sanitize any broken/localhost prefixes
   if (key.startsWith('http://') || key.startsWith('https://')) {
+    if (key.includes('.r2.dev/')) {
+      const cleanKey = key.split('.r2.dev/')[1];
+      return `${prodApi}/api/media/file/${cleanKey.replace(/^\/+/, '')}`;
+    }
+    if (key.includes('/api/media/file/')) {
+      const cleanKey = key.split('/api/media/file/')[1];
+      return `${prodApi}/api/media/file/${cleanKey.replace(/^\/+/, '')}`;
+    }
+    if ((process.env.NODE_ENV === 'production' || process.env.RENDER) && (key.includes('localhost:5000') || key.includes('127.0.0.1:5000'))) {
+      return key.replace(/http:\/\/(localhost|127\.0\.0\.1):5000/g, prodApi);
+    }
     return key;
   }
+
   const cleanKey = key.replace(/^\/+/, '');
-  if (process.env.R2_PUBLIC_URL) {
-    const publicBase = process.env.R2_PUBLIC_URL.replace(/\/+$/, '');
-    return `${publicBase}/${cleanKey}`;
-  }
-  const apiBase = (process.env.API_URL || 'http://localhost:5000').replace(/\/+$/, '');
-  return `${apiBase}/api/media/file/${cleanKey}`;
+  return `${prodApi}/api/media/file/${cleanKey}`;
 };
 
 /**

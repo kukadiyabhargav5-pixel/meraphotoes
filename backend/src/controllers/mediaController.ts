@@ -188,13 +188,14 @@ export const streamMediaFile = async (req: Request, res: Response) => {
     const rawKey = (req.params as any).key || req.params[0] || (req.query as any).key;
     if (!rawKey) return res.status(400).send('Missing file key');
 
-    const key = decodeURIComponent(rawKey);
-
-    // If a public CDN URL is configured, redirect directly
-    if (process.env.R2_PUBLIC_URL) {
-      const publicBase = process.env.R2_PUBLIC_URL.replace(/\/+$/, '');
-      return res.redirect(302, `${publicBase}/${key}`);
+    let key = decodeURIComponent(rawKey).trim();
+    if (key.includes('.r2.dev/')) {
+      key = key.split('.r2.dev/')[1] || key;
     }
+    if (key.includes('/api/media/file/')) {
+      key = key.split('/api/media/file/')[1] || key;
+    }
+    key = key.split('?')[0].replace(/^\/+/, '');
 
     const command = new GetObjectCommand({
       Bucket: R2_BUCKET,
@@ -211,13 +212,24 @@ export const streamMediaFile = async (req: Request, res: Response) => {
       res.status(200);
     }
 
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
     res.setHeader('Accept-Ranges', 'bytes');
     if (s3Response.ContentType) res.setHeader('Content-Type', s3Response.ContentType);
     if (s3Response.ContentLength) res.setHeader('Content-Length', s3Response.ContentLength);
     if (s3Response.ETag) res.setHeader('ETag', s3Response.ETag);
     res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
 
-    (s3Response.Body as any).pipe(res);
+    const body = s3Response.Body as any;
+    if (body && typeof body.pipe === 'function') {
+      body.on('error', (streamErr: any) => {
+        console.error('[StreamMediaFile Stream Error]:', streamErr);
+        if (!res.headersSent) res.status(500).end();
+      });
+      body.pipe(res);
+    } else {
+      res.status(500).send('Unable to stream response');
+    }
   } catch (error: any) {
     if (error.name === 'NoSuchKey' || error.$metadata?.httpStatusCode === 404) {
       return res.status(404).send('File not found in storage');
@@ -319,7 +331,15 @@ export const getEventMedia = async (req: Request, res: Response) => {
     }
 
     const mediaList = await Media.find(query).sort({ createdAt: -1 });
-    return res.json({ media: mediaList });
+    const sanitizedMedia = mediaList.map((m) => {
+      const doc: any = m.toObject();
+      if (doc.r2Url) doc.r2Url = getFileUrl(doc.r2Url);
+      if (doc.compressedUrl) doc.compressedUrl = getFileUrl(doc.compressedUrl);
+      if (doc.thumbnailUrl) doc.thumbnailUrl = getFileUrl(doc.thumbnailUrl);
+      return doc;
+    });
+
+    return res.json({ media: sanitizedMedia });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }
