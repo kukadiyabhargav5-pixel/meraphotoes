@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import { Event, Media, FaceEmbedding, SearchSession } from '../models';
 import { searchFaces, isQdrantAvailable, localCosineSearch } from '../services/qdrantService';
-import { getObjectStream } from '../services/StorageService';
+import { getObjectStream, getFileUrl } from '../services/StorageService';
 import axios from 'axios';
 import FormData from 'form-data';
 import { v4 as uuidv4 } from 'uuid';
@@ -461,8 +461,16 @@ export const faceSearch = async (req: Request, res: Response): Promise<void> => 
       // Sort timestamps
       group.timestamps.sort((a, b) => a - b);
 
+      const r2Url = getFileUrl(media.r2Url || media.r2Key);
+      const compressedUrl = getFileUrl(media.compressedUrl || media.r2Url || media.r2Key);
+      const thumbnailUrl = getFileUrl(media.thumbnailUrl || media.compressedUrl || media.r2Url || media.r2Key);
+
       return {
         ...media,
+        r2Url,
+        compressedUrl,
+        thumbnailUrl,
+        url: r2Url,
         similarity: parseFloat(group.bestSimilarity.toFixed(4)),
         similarityPercent,
         confidence: group.bestSimilarity >= 0.45 ? 'HIGH' : group.bestSimilarity >= 0.38 ? 'MEDIUM' : 'LOW',

@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import axios from 'axios';
 import { FaceEmbedding, Media, Studio } from '../models';
+import { getFileUrl } from '../services/StorageService';
 
 const getCandidateAiUrls = (): string[] => {
   const envUrl = process.env.AI_SERVICE_URL;
@@ -229,8 +230,17 @@ export const searchBySelfie = async (req: Request, res: Response) => {
     const results = mediaDetails.map((media) => {
       const group = mediaGroups[media._id.toString()];
       const similarityPercent = Math.round(group.bestSimilarity * 100);
+      const doc = media.toObject();
+      const r2Url = getFileUrl(doc.r2Url || doc.r2Key);
+      const compressedUrl = getFileUrl(doc.compressedUrl || doc.r2Url || doc.r2Key);
+      const thumbnailUrl = getFileUrl(doc.thumbnailUrl || doc.compressedUrl || doc.r2Url || doc.r2Key);
+
       return {
-        ...media.toObject(),
+        ...doc,
+        r2Url,
+        compressedUrl,
+        thumbnailUrl,
+        url: r2Url,
         similarity: parseFloat(group.bestSimilarity.toFixed(4)),
         similarityPercent,
         confidence: group.bestSimilarity >= HIGH_CONFIDENCE_THRESHOLD ? 'HIGH' : group.bestSimilarity >= 0.50 ? 'MEDIUM' : 'LOW',

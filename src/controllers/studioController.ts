@@ -4,7 +4,7 @@ import { Studio, User, Media } from '../models';
 import { getFileUrl } from '../services/StorageService';
 
 export const PLAN_STORAGE_LIMITS: Record<string, { photos: number; videos: number; name: string }> = {
-  BASIC: { photos: 0, videos: 0, name: 'Basic Free' },
+  BASIC: { photos: 5000, videos: 50, name: 'Basic Free' },
   STARTUP: { photos: 50000, videos: 10, name: 'Startup' },
   STARTER: { photos: 50000, videos: 10, name: 'Startup' },
   STANDARD: { photos: 100000, videos: 20, name: 'Standard' },

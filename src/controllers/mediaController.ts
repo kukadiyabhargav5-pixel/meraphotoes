@@ -195,7 +195,7 @@ export const streamMediaFile = async (req: Request, res: Response) => {
     if (key.includes('/api/media/file/')) {
       key = key.split('/api/media/file/')[1] || key;
     }
-    key = key.replace(/^\/+/, '');
+    key = key.split('?')[0].replace(/^\/+/, '');
 
     const command = new GetObjectCommand({
       Bucket: R2_BUCKET,
@@ -220,7 +220,16 @@ export const streamMediaFile = async (req: Request, res: Response) => {
     if (s3Response.ETag) res.setHeader('ETag', s3Response.ETag);
     res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
 
-    (s3Response.Body as any).pipe(res);
+    const body = s3Response.Body as any;
+    if (body && typeof body.pipe === 'function') {
+      body.on('error', (streamErr: any) => {
+        console.error('[StreamMediaFile Stream Error]:', streamErr);
+        if (!res.headersSent) res.status(500).end();
+      });
+      body.pipe(res);
+    } else {
+      res.status(500).send('Unable to stream response');
+    }
   } catch (error: any) {
     if (error.name === 'NoSuchKey' || error.$metadata?.httpStatusCode === 404) {
       return res.status(404).send('File not found in storage');
