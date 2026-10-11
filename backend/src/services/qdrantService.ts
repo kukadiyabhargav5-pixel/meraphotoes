@@ -127,18 +127,26 @@ export const localCosineSearch = async (
   // Fetch all embeddings for this event
   const allFaces = await FaceEmbedding.find({ eventId }).lean();
   
-  // Calculate cosine similarity manually
-  const dotProduct = (a: number[], b: number[]) => a.reduce((sum, val, i) => sum + val * b[i], 0);
-  const magnitude = (vec: number[]) => Math.sqrt(vec.reduce((sum, val) => sum + val * val, 0));
+  // L2-normalize a vector
+  const l2Norm = (vec: number[]): number[] => {
+    let sumSq = 0;
+    for (const v of vec) sumSq += v * v;
+    const norm = Math.sqrt(sumSq);
+    if (norm === 0 || Math.abs(norm - 1.0) < 0.01) return vec;
+    return vec.map(v => v / norm);
+  };
   
-  const queryMag = magnitude(queryEmbedding);
+  const normalizedQuery = l2Norm(queryEmbedding);
   
   const results = allFaces.map(face => {
-    const faceMag = magnitude(face.embedding);
-    const score = dotProduct(queryEmbedding, face.embedding) / (queryMag * faceMag);
+    const normalizedFace = l2Norm(face.embedding);
+    let dot = 0;
+    for (let i = 0; i < normalizedQuery.length; i++) {
+      dot += normalizedQuery[i] * normalizedFace[i];
+    }
     return {
       id: face._id.toString(),
-      score,
+      score: dot,
       payload: {
         eventId: face.eventId.toString(),
         mediaId: face.mediaId.toString()
@@ -152,3 +160,27 @@ export const localCosineSearch = async (
     .sort((a, b) => b.score - a.score)
     .slice(0, limit);
 };
+
+export const deleteEventPoints = async (eventId: string): Promise<void> => {
+  try {
+    const isAvail = await isQdrantAvailable();
+    if (!isAvail) return;
+    await qdrantClient.delete(COLLECTION_NAME, {
+      wait: true,
+      filter: {
+        must: [
+          {
+            key: 'eventId',
+            match: {
+              value: eventId
+            }
+          }
+        ]
+      }
+    });
+    console.log(`[Qdrant] Successfully deleted face embedding points for event: ${eventId}`);
+  } catch (err: any) {
+    console.warn(`[Qdrant] Warning: Could not delete points for event ${eventId}:`, err?.message || err);
+  }
+};
+

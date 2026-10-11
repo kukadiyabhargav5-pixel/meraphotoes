@@ -160,3 +160,27 @@ export const localCosineSearch = async (
     .sort((a, b) => b.score - a.score)
     .slice(0, limit);
 };
+
+export const deleteEventPoints = async (eventId: string): Promise<void> => {
+  try {
+    const isAvail = await isQdrantAvailable();
+    if (!isAvail) return;
+    await qdrantClient.delete(COLLECTION_NAME, {
+      wait: true,
+      filter: {
+        must: [
+          {
+            key: 'eventId',
+            match: {
+              value: eventId
+            }
+          }
+        ]
+      }
+    });
+    console.log(`[Qdrant] Successfully deleted face embedding points for event: ${eventId}`);
+  } catch (err: any) {
+    console.warn(`[Qdrant] Warning: Could not delete points for event ${eventId}:`, err?.message || err);
+  }
+};
+

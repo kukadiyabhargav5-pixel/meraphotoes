@@ -113,12 +113,14 @@ export const deleteFile = async (keyOrId: string): Promise<void> => {
   try {
     if (!keyOrId) return;
     // Strip public URL prefix if a full URL was provided
-    let key = keyOrId;
+    let key = keyOrId.split('?')[0].trim();
     if (key.includes('/api/media/file/')) {
-      key = key.split('/api/media/file/')[1];
+      key = key.split('/api/media/file/')[1] || key;
     } else if (process.env.R2_PUBLIC_URL && key.includes(process.env.R2_PUBLIC_URL)) {
       key = key.replace(process.env.R2_PUBLIC_URL.replace(/\/+$/, '') + '/', '');
     }
+    key = key.replace(/^\/+/, '');
+    if (!key) return;
 
     await r2Client.send(
       new DeleteObjectCommand({

@@ -5,6 +5,8 @@ import { AuthRequest, isSuperAdmin } from '../middlewares/auth';
 import { Event, Studio, User, Media } from '../models';
 import Customer from '../models/Customer';
 import { sendAdminNotificationEmail, sendEventInviteEmail } from '../services/EmailService';
+import { getFileUrl } from '../services/StorageService';
+import { calculateEventDaysLeft, cleanupExpiredEvents, purgeEventPermanently } from '../services/eventRetentionService';
 
 /**
  * Creates a new event
@@ -28,6 +30,7 @@ export const createEvent = async (req: AuthRequest, res: Response) => {
     password,
     assignedTeamEmails,
     addToPortfolio,
+    allowDownload,
     watermark,
   } = req.body;
 
@@ -48,11 +51,14 @@ export const createEvent = async (req: AuthRequest, res: Response) => {
     }
 
     // Generate unique code slug
-    let code = name.toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-');
+    let baseSlug = (req.body.code || name || 'event').toLowerCase().trim().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+    if (!baseSlug) baseSlug = 'event';
+
+    let code = baseSlug;
     const existingCode = await Event.findOne({ code });
     if (existingCode) {
       // Append unique timestamp hash to guarantee uniqueness
-      code = `${code}-${Math.random().toString(36).substring(2, 6)}`;
+      code = `${baseSlug}-${Math.random().toString(36).substring(2, 6)}`;
     }
 
     let passwordHash = undefined;
@@ -80,7 +86,7 @@ export const createEvent = async (req: AuthRequest, res: Response) => {
       clientEmail,
       date: new Date(date),
       type,
-      coverImageUrl,
+      coverImageUrl: coverImageUrl ? getFileUrl(coverImageUrl) : coverImageUrl,
       description,
       location,
       time,
@@ -92,7 +98,13 @@ export const createEvent = async (req: AuthRequest, res: Response) => {
       studioId: studio._id,
       assignedTeamMembers,
       addToPortfolio: addToPortfolio || false,
-      watermark: watermark || { isActive: false, type: 'LOGO', position: 'BOTTOM_RIGHT', width: 20, height: 20, opacity: 0.5 },
+      allowDownload: allowDownload !== undefined ? allowDownload : true,
+      watermark: watermark
+        ? {
+            ...watermark,
+            logoUrl: watermark.logoUrl ? getFileUrl(watermark.logoUrl) : watermark.logoUrl,
+          }
+        : { isActive: false, type: 'LOGO', position: 'BOTTOM_RIGHT', width: 20, height: 20, opacity: 0.5 },
     });
 
     // Auto-sync client to Customers directory with permanent Event details
@@ -159,23 +171,27 @@ export const getMyEvents = async (req: AuthRequest, res: Response) => {
     if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
 
     // Clean up any events older than 30 days
-    const { cleanupExpiredEvents } = await import('../services/eventRetentionService');
     await cleanupExpiredEvents().catch(err => console.error('Auto cleanup error:', err));
 
     const studio = await Studio.findOne({ ownerId: req.user._id });
     if (!studio) {
       if (isSuperAdmin(req.user)) {
-        const events = await Event.find().sort({ date: -1 });
-        const now = new Date();
-        const todayMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+        const events = await Event.find().sort({ createdAt: -1 });
         const enrichedEvents = events.map(ev => {
           const evObj = ev.toObject();
-          const baseDate = ev.date ? new Date(ev.date) : new Date(ev.createdAt || ev._id.getTimestamp());
-          const baseMidnight = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate()).getTime();
-          const diffDays = Math.floor((todayMidnight - baseMidnight) / (1000 * 60 * 60 * 24));
-          const daysLeft = diffDays <= 0 ? 30 : Math.max(0, 30 - diffDays);
-          return { ...evObj, daysLeft, autoDeleteAt: new Date(baseMidnight + 30 * 24 * 60 * 60 * 1000) };
+          if (evObj.coverImageUrl) evObj.coverImageUrl = getFileUrl(evObj.coverImageUrl);
+          const { daysLeft, autoDeleteAt } = calculateEventDaysLeft(ev);
+          return { ...evObj, daysLeft, autoDeleteAt };
         });
+
+        // Sort: highest days remaining first (e.g. 30 -> 29 -> ... -> 1 -> 0), then newest created
+        enrichedEvents.sort((a, b) => {
+          if (b.daysLeft !== a.daysLeft) return b.daysLeft - a.daysLeft;
+          const timeA = new Date(a.createdAt || 0).getTime();
+          const timeB = new Date(b.createdAt || 0).getTime();
+          return timeB - timeA;
+        });
+
         return res.json({ events: enrichedEvents });
       }
       return res.json({ events: [] });
@@ -186,16 +202,20 @@ export const getMyEvents = async (req: AuthRequest, res: Response) => {
       query = { studioId: studio._id, assignedTeamMembers: req.user._id };
     }
 
-    const events = await Event.find(query).sort({ date: -1 });
-    const now = new Date();
-    const todayMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const events = await Event.find(query).sort({ createdAt: -1 });
     const enrichedEvents = events.map(ev => {
       const evObj = ev.toObject();
-      const baseDate = ev.date ? new Date(ev.date) : new Date(ev.createdAt || ev._id.getTimestamp());
-      const baseMidnight = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate()).getTime();
-      const diffDays = Math.floor((todayMidnight - baseMidnight) / (1000 * 60 * 60 * 24));
-      const daysLeft = diffDays <= 0 ? 30 : Math.max(0, 30 - diffDays);
-      return { ...evObj, daysLeft, autoDeleteAt: new Date(baseMidnight + 30 * 24 * 60 * 60 * 1000) };
+      if (evObj.coverImageUrl) evObj.coverImageUrl = getFileUrl(evObj.coverImageUrl);
+      const { daysLeft, autoDeleteAt } = calculateEventDaysLeft(ev);
+      return { ...evObj, daysLeft, autoDeleteAt };
+    });
+
+    // Sort: highest days remaining first (e.g. 30 -> 29 -> ... -> 1 -> 0), then newest created
+    enrichedEvents.sort((a, b) => {
+      if (b.daysLeft !== a.daysLeft) return b.daysLeft - a.daysLeft;
+      const timeA = new Date(a.createdAt || 0).getTime();
+      const timeB = new Date(b.createdAt || 0).getTime();
+      return timeB - timeA;
     });
 
     return res.json({ events: enrichedEvents });
@@ -211,8 +231,15 @@ export const getEventByCode = async (req: Request, res: Response) => {
   const { code } = req.params;
 
   try {
-    const event = await Event.findOne({ code })
-      .populate('studioId', 'name logoUrl watermark customDomain instagramUrl facebookUrl');
+    let event = null;
+    if (code.match(/^[0-9a-fA-F]{24}$/)) {
+      event = await Event.findById(code)
+        .populate('studioId', 'name logoUrl watermark customDomain instagramUrl facebookUrl');
+    }
+    if (!event) {
+      event = await Event.findOne({ code })
+        .populate('studioId', 'name logoUrl watermark customDomain instagramUrl facebookUrl');
+    }
     
     if (!event) {
       return res.status(404).json({ error: 'Event gallery not found' });
@@ -221,6 +248,22 @@ export const getEventByCode = async (req: Request, res: Response) => {
     // Redact passwordHash before sending
     const eventObj = event.toObject();
     delete eventObj.passwordHash;
+    if (eventObj.coverImageUrl) eventObj.coverImageUrl = getFileUrl(eventObj.coverImageUrl);
+    if (eventObj.studioId && (eventObj.studioId as any).logoUrl) {
+      (eventObj.studioId as any).logoUrl = getFileUrl((eventObj.studioId as any).logoUrl);
+    }
+
+    if (event.accessType !== 'PASSWORD' && event.accessType !== 'OTP') {
+      const media = await Media.find({ eventId: event._id }).sort({ createdAt: -1 });
+      const sanitizedMedia = media.map(m => {
+        const doc: any = m.toObject();
+        if (doc.r2Url) doc.r2Url = getFileUrl(doc.r2Url);
+        if (doc.compressedUrl) doc.compressedUrl = getFileUrl(doc.compressedUrl);
+        if (doc.thumbnailUrl) doc.thumbnailUrl = getFileUrl(doc.thumbnailUrl);
+        return doc;
+      });
+      return res.json({ event: eventObj, media: sanitizedMedia });
+    }
 
     return res.json({ event: eventObj });
   } catch (err: any) {
@@ -311,6 +354,7 @@ export const updateEvent = async (req: AuthRequest, res: Response) => {
     password,
     watermark,
     addToPortfolio,
+    allowDownload,
   } = req.body;
 
   try {
@@ -339,7 +383,32 @@ export const updateEvent = async (req: AuthRequest, res: Response) => {
       }
     }
 
-    if (name) event.name = name;
+    const requestedCode = req.body.code
+      ? req.body.code.toLowerCase().trim().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '')
+      : null;
+
+    if (requestedCode && requestedCode !== event.code) {
+      // User explicitly changed or specified the URL slug
+      let candidate = requestedCode;
+      const existing = await Event.findOne({ code: candidate, _id: { $ne: event._id } });
+      if (existing) {
+        candidate = `${requestedCode}-${Math.random().toString(36).substring(2, 6)}`;
+      }
+      event.code = candidate;
+    } else if (name && name.trim() && name.trim() !== event.name) {
+      // Event name changed, automatically update the URL slug to match the new event name
+      const nameSlug = name.toLowerCase().trim().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+      if (nameSlug && nameSlug !== event.code) {
+        let candidate = nameSlug;
+        const existing = await Event.findOne({ code: candidate, _id: { $ne: event._id } });
+        if (existing) {
+          candidate = `${nameSlug}-${Math.random().toString(36).substring(2, 6)}`;
+        }
+        event.code = candidate;
+      }
+    }
+
+    if (name && name.trim()) event.name = name.trim();
     if (clientName) event.clientName = clientName;
     if (clientMobile) event.clientMobile = clientMobile;
     if (clientEmail) event.clientEmail = clientEmail;
@@ -353,6 +422,7 @@ export const updateEvent = async (req: AuthRequest, res: Response) => {
     if (totalDays !== undefined) event.totalDays = totalDays;
     if (days !== undefined) event.days = days;
     if (addToPortfolio !== undefined) event.addToPortfolio = addToPortfolio;
+    if (allowDownload !== undefined) event.allowDownload = allowDownload;
 
     if (accessType) {
       event.accessType = accessType;
@@ -499,13 +569,10 @@ export const deleteEvent = async (req: Request, res: Response) => {
     }
     if (!event) return res.status(404).json({ error: 'Event not found' });
 
-    // Delete associated media documents
-    await Media.deleteMany({ eventId: event._id });
+    // Permanently purge event and media from R2 and MongoDB, preserving visitor leads
+    await purgeEventPermanently(event);
 
-    // Delete event document
-    await Event.findByIdAndDelete(event._id);
-
-    return res.json({ message: 'Event and all its associated media deleted successfully' });
+    return res.json({ message: 'Event and all its associated media deleted permanently from cloud and database' });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }
@@ -555,3 +622,48 @@ export const updatePortfolioStatus = async (req: AuthRequest, res: Response) => 
     return res.status(500).json({ error: err.message });
   }
 };
+
+/**
+ * Update event download permission status instantly
+ */
+export const updateDownloadStatus = async (req: AuthRequest, res: Response) => {
+  const { eventId } = req.params;
+  const { allowDownload } = req.body;
+
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+    let event;
+    if (eventId.match(/^[0-9a-fA-F]{24}$/)) {
+      event = await Event.findById(eventId);
+    } else {
+      event = await Event.findOne({ code: eventId });
+    }
+    
+    if (!event) return res.status(404).json({ error: 'Event not found' });
+
+    const studio = await Studio.findOne({ ownerId: req.user._id });
+    if (!studio && !isSuperAdmin(req.user)) {
+      if (req.user.role === 'TEAM_MEMBER') {
+        const isAssigned = event.assignedTeamMembers.some(
+          (tmId) => tmId.toString() === req.user?._id.toString()
+        );
+        if (!isAssigned) {
+          return res.status(403).json({ error: 'Unauthorized to update this event' });
+        }
+      } else {
+        return res.status(403).json({ error: 'Unauthorized to update this event' });
+      }
+    }
+
+    if (allowDownload !== undefined) {
+      event.allowDownload = allowDownload;
+      await event.save();
+    }
+
+    return res.json({ message: 'Download status updated successfully', event });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+};
+

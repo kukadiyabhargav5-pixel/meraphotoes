@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { User, Studio, Event, Media, Booking, Customer, Quotation, Bill, SupportTicket, FaceEmbedding, ClientTicket, Portfolio, EventCover, ShootLog, GalleryVisitor } from '../models';
 import { deleteFile } from '../services/StorageService';
+import { purgeEventPermanently } from '../services/eventRetentionService';
 
 /**
  * Get a single user by ID
@@ -323,30 +324,7 @@ export const getAllTickets = async (req: Request, res: Response) => {
 };
 
 const deleteEventInternal = async (eventId: string) => {
-  // Find all Media for this event
-  const mediaList = await Media.find({ eventId });
-  
-  // Delete from Cloud Storage
-  for (const media of mediaList) {
-    if (media.r2Key) {
-      await deleteFile(media.r2Key).catch(err => console.warn(`Failed to delete ${media.r2Key}:`, err));
-    }
-  }
-  
-  const mediaIds = mediaList.map(m => m._id);
-  
-  // Delete FaceEmbeddings
-  await FaceEmbedding.deleteMany({ mediaId: { $in: mediaIds } });
-  
-  // Delete Media
-  await Media.deleteMany({ _id: { $in: mediaIds } });
-  
-  // Delete ShootLog and EventCover
-  await ShootLog.deleteMany({ eventId });
-  await EventCover.deleteMany({ eventId });
-  
-  // Finally delete the Event
-  await Event.findByIdAndDelete(eventId);
+  await purgeEventPermanently(eventId);
 };
 
 const deleteStudioInternal = async (studioId: string) => {

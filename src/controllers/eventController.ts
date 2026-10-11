@@ -6,6 +6,7 @@ import { Event, Studio, User, Media } from '../models';
 import Customer from '../models/Customer';
 import { sendAdminNotificationEmail, sendEventInviteEmail } from '../services/EmailService';
 import { getFileUrl } from '../services/StorageService';
+import { calculateEventDaysLeft, cleanupExpiredEvents, purgeEventPermanently } from '../services/eventRetentionService';
 
 /**
  * Creates a new event
@@ -170,29 +171,24 @@ export const getMyEvents = async (req: AuthRequest, res: Response) => {
     if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
 
     // Clean up any events older than 30 days
-    const { cleanupExpiredEvents } = await import('../services/eventRetentionService');
     await cleanupExpiredEvents().catch(err => console.error('Auto cleanup error:', err));
 
     const studio = await Studio.findOne({ ownerId: req.user._id });
     if (!studio) {
       if (isSuperAdmin(req.user)) {
-        const events = await Event.find().sort({ date: -1 });
-        const now = new Date();
-        const todayMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+        const events = await Event.find().sort({ createdAt: -1 });
         const enrichedEvents = events.map(ev => {
           const evObj = ev.toObject();
-          const baseDate = ev.date ? new Date(ev.date) : new Date(ev.createdAt || ev._id.getTimestamp());
-          const baseMidnight = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate()).getTime();
-          const diffDays = Math.floor((todayMidnight - baseMidnight) / (1000 * 60 * 60 * 24));
-          const daysLeft = diffDays <= 0 ? 30 : Math.max(0, 30 - diffDays);
-          return { ...evObj, daysLeft, autoDeleteAt: new Date(baseMidnight + 30 * 24 * 60 * 60 * 1000) };
+          if (evObj.coverImageUrl) evObj.coverImageUrl = getFileUrl(evObj.coverImageUrl);
+          const { daysLeft, autoDeleteAt } = calculateEventDaysLeft(ev);
+          return { ...evObj, daysLeft, autoDeleteAt };
         });
 
-        // Sort: highest days remaining first (e.g. 30 -> 18 -> 13 -> 0), then newest created
+        // Sort: highest days remaining first (e.g. 30 -> 29 -> ... -> 1 -> 0), then newest created
         enrichedEvents.sort((a, b) => {
           if (b.daysLeft !== a.daysLeft) return b.daysLeft - a.daysLeft;
-          const timeA = new Date(a.createdAt || a.date || 0).getTime();
-          const timeB = new Date(b.createdAt || b.date || 0).getTime();
+          const timeA = new Date(a.createdAt || 0).getTime();
+          const timeB = new Date(b.createdAt || 0).getTime();
           return timeB - timeA;
         });
 
@@ -206,24 +202,19 @@ export const getMyEvents = async (req: AuthRequest, res: Response) => {
       query = { studioId: studio._id, assignedTeamMembers: req.user._id };
     }
 
-    const events = await Event.find(query).sort({ date: -1 });
-    const now = new Date();
-    const todayMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const events = await Event.find(query).sort({ createdAt: -1 });
     const enrichedEvents = events.map(ev => {
       const evObj = ev.toObject();
       if (evObj.coverImageUrl) evObj.coverImageUrl = getFileUrl(evObj.coverImageUrl);
-      const baseDate = ev.date ? new Date(ev.date) : new Date(ev.createdAt || ev._id.getTimestamp());
-      const baseMidnight = new Date(baseDate.getFullYear(), baseDate.getMonth(), baseDate.getDate()).getTime();
-      const diffDays = Math.floor((todayMidnight - baseMidnight) / (1000 * 60 * 60 * 24));
-      const daysLeft = diffDays <= 0 ? 30 : Math.max(0, 30 - diffDays);
-      return { ...evObj, daysLeft, autoDeleteAt: new Date(baseMidnight + 30 * 24 * 60 * 60 * 1000) };
+      const { daysLeft, autoDeleteAt } = calculateEventDaysLeft(ev);
+      return { ...evObj, daysLeft, autoDeleteAt };
     });
 
-    // Sort: highest days remaining first (e.g. 30 -> 18 -> 13 -> 0), then newest created
+    // Sort: highest days remaining first (e.g. 30 -> 29 -> ... -> 1 -> 0), then newest created
     enrichedEvents.sort((a, b) => {
       if (b.daysLeft !== a.daysLeft) return b.daysLeft - a.daysLeft;
-      const timeA = new Date(a.createdAt || a.date || 0).getTime();
-      const timeB = new Date(b.createdAt || b.date || 0).getTime();
+      const timeA = new Date(a.createdAt || 0).getTime();
+      const timeB = new Date(b.createdAt || 0).getTime();
       return timeB - timeA;
     });
 
@@ -578,13 +569,10 @@ export const deleteEvent = async (req: Request, res: Response) => {
     }
     if (!event) return res.status(404).json({ error: 'Event not found' });
 
-    // Delete associated media documents
-    await Media.deleteMany({ eventId: event._id });
+    // Permanently purge event and media from R2 and MongoDB, preserving visitor leads
+    await purgeEventPermanently(event);
 
-    // Delete event document
-    await Event.findByIdAndDelete(event._id);
-
-    return res.json({ message: 'Event and all its associated media deleted successfully' });
+    return res.json({ message: 'Event and all its associated media deleted permanently from cloud and database' });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }
