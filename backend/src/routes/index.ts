@@ -12,6 +12,7 @@ import visitorRoutes from './visitorRoutes';
 import clientTicketRoutes from './clientTicketRoutes';
 import adminRoutes from './adminRoutes';
 import contactRoutes from './contactRoutes';
+import planRoutes from './planRoutes';
 import faceIndexRoutes from './faceIndexRoutes';
 import { downloadFaceScanZip } from '../controllers/searchController';
 
@@ -32,6 +33,7 @@ router.use('/visitors', visitorRoutes);
 router.use('/client-tickets', clientTicketRoutes);
 router.use('/contact', contactRoutes);
 router.use('/face-index', faceIndexRoutes);
+router.use('/plans', planRoutes);
 
 // Direct Face Scan matching photos ZIP streaming download endpoint
 router.post('/face-scan/download-zip', downloadFaceScanZip);

@@ -18,9 +18,9 @@ const router = Router();
 // Public / Auth Payment Config
 router.get('/config', getPaymentConfig);
 
-// E-Commerce & Plan Payment Flow
-router.post('/create-order', createOrderSession);
-router.post('/verify', verifyPayment);
+// E-Commerce & Plan Payment Flow (Protected)
+router.post('/create-order', authenticateJWT, createOrderSession);
+router.post('/verify', authenticateJWT, verifyPayment);
 router.get('/order/:id', getOrderById);
 router.get('/my-orders', authenticateJWT, getUserOrders);
 

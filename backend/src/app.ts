@@ -51,7 +51,12 @@ const corsOptions: cors.CorsOptions = {
 
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({ 
+  limit: '50mb',
+  verify: (req: any, _res, buf) => {
+    req.rawBody = buf;
+  }
+}));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 app.use('/api', limiter);
@@ -98,6 +103,7 @@ app.use((err: any, req: Request, res: Response, next: NextFunction) => {
 
 import { initializeQdrant } from './services/qdrantService';
 import { startEventRetentionScheduler } from './services/eventRetentionService';
+import { seedDefaultPlans } from './controllers/pricingController';
 
 // ── AI Service Keep-Alive Pinger ──────────────────────────────────
 // Prevents Render free-tier from sleeping the AI service after 5 min inactivity.
@@ -159,6 +165,7 @@ mongoose
       console.log(`Backend server running on port ${PORT}`);
       // Non-blocking background initializations
       initializeQdrant().catch((err) => console.warn('[Qdrant] Background init notice:', err?.message));
+      seedDefaultPlans().catch((err) => console.warn('[PricingPlans] Init notice:', err?.message));
       startEventRetentionScheduler();
       startAiKeepAlive();
     });
