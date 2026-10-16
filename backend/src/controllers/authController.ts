@@ -3,8 +3,9 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { User, Studio } from '../models';
 import { sendOTPEmail, sendWelcomeEmail, sendAdminNotificationEmail } from '../services/EmailService';
-import { AuthRequest } from '../middlewares/auth';
+import { AuthRequest, isSuperAdmin } from '../middlewares/auth';
 import { OAuth2Client } from 'google-auth-library';
+import axios from 'axios';
 
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
@@ -28,11 +29,12 @@ export const registerStudioOwner = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'All fields are required' });
     }
 
-    if (!/^[6-9]\d{9}$/.test(phone)) {
+    const cleanPhone = phone ? String(phone).replace(/\D/g, '').slice(-10) : '';
+    if (!/^[6-9]\d{9}$/.test(cleanPhone)) {
       return res.status(400).json({ error: 'Mobile number must be exactly 10 digits and start with 6, 7, 8, or 9.' });
     }
 
-    const passwordRegex = /^[A-Z](?=.*[a-z])(?=.*\d)(?=.*[@$!%*?&#]).{5,}$/;
+    const passwordRegex = /^[A-Z](?=.*[a-z])(?=.*\d)(?=.*[@$!%*?&#_\-~+=/.,><:;^]).{5,}$/;
     if (!passwordRegex.test(password)) {
       return res.status(400).json({ error: 'Password must start with a Capital letter, and contain at least 1 number, 1 special character, and small letters.' });
     }
@@ -50,7 +52,7 @@ export const registerStudioOwner = async (req: Request, res: Response) => {
     const newUser = await User.create({
       name,
       email: email.toLowerCase(),
-      phone,
+      phone: cleanPhone,
       passwordHash,
       role: 'STUDIO_OWNER',
     });
@@ -117,9 +119,36 @@ export const login = async (req: Request, res: Response) => {
       adminUser.refreshToken = tokens.refreshToken;
       await adminUser.save();
 
+      // Ensure Super Admin has an active studio with unlimited PREMIUM access
+      let studio = await Studio.findOne({ ownerId: adminUser._id });
+      if (!studio) {
+        studio = await Studio.create({
+          name: 'Super Admin Studio',
+          ownerId: adminUser._id,
+          subscriptionPlan: 'PREMIUM',
+          subscriptionStatus: 'ACTIVE',
+          subscriptionExpiresAt: new Date('2099-12-31')
+        });
+      } else if (!studio.subscriptionPlan) {
+        studio.subscriptionPlan = 'PREMIUM';
+        studio.subscriptionStatus = 'ACTIVE';
+        studio.subscriptionExpiresAt = new Date('2099-12-31');
+        await studio.save();
+      }
+
       return res.json({
         user: { id: adminUser._id, name: adminUser.name, email: adminUser.email, role: adminUser.role },
-        studio: null,
+        studio: {
+          id: studio._id,
+          name: studio.name,
+          subscriptionPlan: studio.subscriptionPlan || 'PREMIUM',
+          subscriptionStatus: studio.subscriptionStatus || 'ACTIVE',
+          subscriptionStartDate: studio.subscriptionStartDate,
+          subscriptionExpiresAt: studio.subscriptionExpiresAt,
+          logoUrl: studio.logoUrl,
+          customDomain: studio.customDomain,
+          branding: studio.branding
+        },
         ...tokens,
       });
     }
@@ -140,8 +169,24 @@ export const login = async (req: Request, res: Response) => {
 
     // Check if user is associated with any studio
     let studio = null;
-    if (user.role === 'STUDIO_OWNER') {
+    if (user.role === 'STUDIO_OWNER' || isSuperAdmin(user)) {
       studio = await Studio.findOne({ ownerId: user._id });
+      if (isSuperAdmin(user)) {
+        if (!studio) {
+          studio = await Studio.create({
+            name: 'Super Admin Studio',
+            ownerId: user._id,
+            subscriptionPlan: 'PREMIUM',
+            subscriptionStatus: 'ACTIVE',
+            subscriptionExpiresAt: new Date('2099-12-31')
+          });
+        } else if (!studio.subscriptionPlan) {
+          studio.subscriptionPlan = 'PREMIUM';
+          studio.subscriptionStatus = 'ACTIVE';
+          studio.subscriptionExpiresAt = new Date('2099-12-31');
+          await studio.save();
+        }
+      }
     }
 
     return res.json({
@@ -168,19 +213,34 @@ export const login = async (req: Request, res: Response) => {
  * Google Login/Signup
  */
 export const googleLogin = async (req: Request, res: Response) => {
-  const { credential } = req.body;
+  const { credential, accessToken } = req.body;
   try {
-    const ticket = await googleClient.verifyIdToken({
-      idToken: credential,
-      audience: process.env.GOOGLE_CLIENT_ID,
-    });
-    const payload = ticket.getPayload();
-    if (!payload || !payload.email) {
-      return res.status(400).json({ error: 'Invalid Google token' });
-    }
+    let email = '';
+    let name = 'User';
 
-    const email = payload.email.toLowerCase();
-    const name = payload.name || 'User';
+    if (credential) {
+      const ticket = await googleClient.verifyIdToken({
+        idToken: credential,
+        audience: process.env.GOOGLE_CLIENT_ID,
+      });
+      const payload = ticket.getPayload();
+      if (!payload || !payload.email) {
+        return res.status(400).json({ error: 'Invalid Google token' });
+      }
+      email = payload.email.toLowerCase();
+      name = payload.name || 'User';
+    } else if (accessToken) {
+      const googleRes = await axios.get('https://www.googleapis.com/oauth2/v3/userinfo', {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!googleRes.data || !googleRes.data.email) {
+        return res.status(400).json({ error: 'Could not fetch Google profile' });
+      }
+      email = googleRes.data.email.toLowerCase();
+      name = googleRes.data.name || 'User';
+    } else {
+      return res.status(400).json({ error: 'Missing Google credential or access token' });
+    }
 
     let user = await User.findOne({ email });
 
@@ -254,8 +314,24 @@ export const getMe = async (req: AuthRequest, res: Response) => {
     }
 
     let studio = null;
-    if (user.role === 'STUDIO_OWNER') {
+    if (user.role === 'STUDIO_OWNER' || isSuperAdmin(user)) {
       studio = await Studio.findOne({ ownerId: user._id });
+      if (isSuperAdmin(user)) {
+        if (!studio) {
+          studio = await Studio.create({
+            name: 'Super Admin Studio',
+            ownerId: user._id,
+            subscriptionPlan: 'PREMIUM',
+            subscriptionStatus: 'ACTIVE',
+            subscriptionExpiresAt: new Date('2099-12-31')
+          });
+        } else if (!studio.subscriptionPlan) {
+          studio.subscriptionPlan = 'PREMIUM';
+          studio.subscriptionStatus = 'ACTIVE';
+          studio.subscriptionExpiresAt = new Date('2099-12-31');
+          await studio.save();
+        }
+      }
     }
 
     return res.json({
@@ -509,6 +585,51 @@ export const checkEmail = async (req: Request, res: Response) => {
     }
     const existing = await User.findOne({ email: (email as string).toLowerCase() });
     return res.json({ exists: !!existing });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+};
+
+/**
+ * Update authenticated user & studio profile (used after Google signup or profile editing)
+ */
+export const updateProfile = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+    const { name, phone, studioName, websiteLink, instagramUrl, facebookUrl, logoUrl, password } = req.body;
+    
+    const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ error: 'User not found' });
+    if (name) user.name = name;
+    if (phone) user.phone = phone;
+    if (password) {
+      const salt = await bcrypt.genSalt(10);
+      user.passwordHash = await bcrypt.hash(password, salt);
+    }
+    await user.save();
+
+    let studio = await Studio.findOne({ ownerId: user._id });
+    if (studio) {
+      if (studioName) studio.name = studioName;
+      if (websiteLink !== undefined) studio.customDomain = websiteLink;
+      if (instagramUrl !== undefined) studio.instagramUrl = instagramUrl;
+      if (facebookUrl !== undefined) studio.facebookUrl = facebookUrl;
+      if (logoUrl !== undefined) studio.logoUrl = logoUrl;
+      await studio.save();
+    } else if (studioName) {
+      studio = await Studio.create({
+        name: studioName,
+        ownerId: user._id,
+        customDomain: websiteLink || undefined,
+        instagramUrl: instagramUrl || undefined,
+        facebookUrl: facebookUrl || undefined,
+        logoUrl: logoUrl || undefined,
+        subscriptionPlan: 'BASIC',
+        subscriptionStatus: 'ACTIVE',
+      });
+    }
+
+    return res.json({ message: 'Profile updated successfully', user, studio });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }

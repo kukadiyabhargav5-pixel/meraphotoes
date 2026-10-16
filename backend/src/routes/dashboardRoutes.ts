@@ -14,7 +14,7 @@ import { Event } from '../models/Event';
 import { Media } from '../models/Media';
 import { Studio } from '../models/Studio';
 import GalleryVisitor from '../models/GalleryVisitor';
-import { authenticateJWT, AuthRequest } from '../middlewares/auth';
+import { authenticateJWT, AuthRequest, isSuperAdmin } from '../middlewares/auth';
 import { uploadFile } from '../services/StorageService';
 
 const router = express.Router();
@@ -69,10 +69,21 @@ router.get('/stats', async (req: AuthRequest, res) => {
     const userId = req.user?._id;
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
+    const adminUser = isSuperAdmin(req.user);
     // Find the studio for this user with lean projection
-    const studio = await Studio.findOne({ ownerId: userId }).select('name subscriptionPlan _id').lean();
+    let studio: any = await Studio.findOne({ ownerId: userId }).select('name subscriptionPlan subscriptionStartDate subscriptionExpiresAt subscriptionStatus _id').lean();
+    if (!studio && adminUser) {
+      const created = await Studio.create({
+        name: 'Super Admin Studio',
+        ownerId: userId,
+        subscriptionPlan: 'PREMIUM',
+        subscriptionStatus: 'ACTIVE',
+        subscriptionExpiresAt: new Date('2099-12-31')
+      });
+      studio = created.toObject();
+    }
     if (!studio) {
-      return res.json({ events: 0, photos: 0, customers: 0 });
+      return res.json({ events: 0, photos: 0, customers: 0, subscriptionPlan: adminUser ? 'PREMIUM' : 'BASIC' });
     }
 
     const studioId = studio._id;
@@ -93,7 +104,7 @@ router.get('/stats', async (req: AuthRequest, res) => {
       teamMembers: teamCount,
       customers: customersCount,
       studioName: studio.name,
-      subscriptionPlan: studio.subscriptionPlan,
+      subscriptionPlan: studio.subscriptionPlan || (adminUser ? 'PREMIUM' : 'BASIC'),
     });
   } catch (error: any) {
     console.error('Stats error:', error);
@@ -470,6 +481,10 @@ router.post('/free-upgrade', async (req: AuthRequest, res: express.Response) => 
 
     let studio = await Studio.findOne({ ownerId: req.user?._id });
     
+    const startDate = new Date();
+    const oneYearFromNow = new Date(startDate.getTime() + 365 * 24 * 60 * 60 * 1000);
+    const planKey = (plan || 'BASIC').toUpperCase();
+
     if (!studio) {
       console.log('[free-upgrade] No studio found, auto-creating one...');
       // Auto-create a studio (same logic as /studio/me)
@@ -480,8 +495,11 @@ router.post('/free-upgrade', async (req: AuthRequest, res: express.Response) => 
       studio = await Studio.create({
         name: cleanName,
         ownerId: req.user?._id,
-        subscriptionPlan: plan,
+        subscriptionPlan: planKey,
         subscriptionStatus: 'ACTIVE',
+        subscriptionStartDate: startDate,
+        subscriptionExpiresAt: oneYearFromNow,
+        usage: { photosUploaded: 0, videosUploaded: 0, aiSearchesCount: 0 }
       });
       
       // Upgrade role if needed
@@ -491,19 +509,22 @@ router.post('/free-upgrade', async (req: AuthRequest, res: express.Response) => 
       }
       
       console.log('[free-upgrade] Auto-created studio:', studio.name);
-      return res.json({ message: 'Free upgrade successful (new studio created)', studio });
+      const { calculateStudioCredits } = await import('../controllers/studioController');
+      const credits = await calculateStudioCredits(studio._id, studio.subscriptionPlan, studio);
+      return res.json({ message: 'Free upgrade successful (new studio created)', studio, credits });
     }
 
-    const startDate = new Date();
-    const oneYearFromNow = new Date(startDate.getTime() + 365 * 24 * 60 * 60 * 1000);
-    studio.subscriptionPlan = plan;
+    studio.subscriptionPlan = planKey;
     studio.subscriptionStatus = 'ACTIVE';
     studio.subscriptionStartDate = startDate;
     studio.subscriptionExpiresAt = oneYearFromNow;
+    studio.usage = { photosUploaded: 0, videosUploaded: 0, aiSearchesCount: 0 };
     await studio.save();
 
-    console.log('[free-upgrade] Studio upgraded:', studio.name, '->', plan);
-    return res.json({ message: 'Free upgrade successful', studio });
+    console.log('[free-upgrade] Studio upgraded:', studio.name, '->', planKey);
+    const { calculateStudioCredits } = await import('../controllers/studioController');
+    const credits = await calculateStudioCredits(studio._id, studio.subscriptionPlan, studio);
+    return res.json({ message: 'Free upgrade successful', studio, credits });
   } catch (err: any) {
     console.error('[free-upgrade] Error:', err.message);
     return res.status(500).json({ error: err.message });

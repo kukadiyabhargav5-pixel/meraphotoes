@@ -34,16 +34,8 @@ const FaceEmbeddingSchema = new Schema<IFaceEmbedding>({
   timestamps: true
 });
 
-// If using MongoDB Atlas Vector Search, you would configure an index like:
-// {
-//   "fields": [
-//     {
-//       "type": "vector",
-//       "path": "embedding",
-//       "numDimensions": 512,
-//       "similarity": "cosine"
-//     }
-//   ]
-// }
+// Fast lookups for event face search and studio galleries
+FaceEmbeddingSchema.index({ eventId: 1, mediaId: 1 });
+FaceEmbeddingSchema.index({ studioId: 1 });
 
 export const FaceEmbedding = mongoose.model<IFaceEmbedding>('FaceEmbedding', FaceEmbeddingSchema);

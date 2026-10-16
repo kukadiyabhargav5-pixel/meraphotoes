@@ -18,6 +18,13 @@ import {
   getStudioEvents,
   getEventVisitors
 } from '../controllers/adminController';
+import {
+  getAllPlansAdmin,
+  createPlan,
+  updatePlan,
+  togglePlanActive,
+  archivePlan
+} from '../controllers/pricingController';
 import { authenticateJWT, requireRoles } from '../middlewares/auth';
 
 const router = Router();
@@ -48,5 +55,12 @@ router.put('/events/:id', updateEvent);
 router.delete('/users/:id', deleteUser);
 router.delete('/studios/:id', deleteStudio);
 router.delete('/events/:id', deleteEvent);
+
+// Pricing Plan Management
+router.get('/plans', getAllPlansAdmin);
+router.post('/plans', createPlan);
+router.put('/plans/:id', updatePlan);
+router.patch('/plans/:id/toggle', togglePlanActive);
+router.delete('/plans/:id', archivePlan);
 
 export default router;

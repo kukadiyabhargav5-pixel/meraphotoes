@@ -1,7 +1,14 @@
 import { Request, Response } from 'express';
 import { AuthRequest } from '../middlewares/auth';
 import { Studio, User, Order } from '../models';
-import { createRazorpayOrder, verifyPaymentSignature, cancelSubscription, verifyWebhookSignature, PLAN_PRICES } from '../services/RazorpayService';
+import { 
+  createRazorpayOrder, 
+  verifyPaymentSignature, 
+  cancelSubscription, 
+  verifyWebhookSignature, 
+  getAuthoritativePlanPrice,
+  PLAN_PRICES 
+} from '../services/RazorpayService';
 import { calculateStudioCredits } from './studioController';
 import { sendOTPEmail } from '../services/EmailService';
 
@@ -10,7 +17,7 @@ import { sendOTPEmail } from '../services/EmailService';
  */
 export const getPaymentConfig = (req: Request, res: Response) => {
   return res.json({ 
-    keyId: process.env.RAZORPAY_KEY_ID || 'rzp_test_TCrfzMZeYCcbsJ',
+    keyId: process.env.RAZORPAY_KEY_ID || '',
     currency: 'INR'
   });
 };
@@ -32,34 +39,36 @@ function isValidPincode(pincode: string): boolean {
 }
 
 /**
- * Recalculate cart totals securely on server side
+ * Recalculate cart totals securely on server side using authoritative DB pricing
  */
-function calculateServerTotals(cartItems: any[]) {
+async function calculateServerTotals(cartItems: any[]) {
   let subtotal = 0;
-  const verifiedItems = cartItems.map((item: any) => {
-    let itemPrice = Number(item.price) || 0;
-    
-    // If it's a known plan, strictly enforce verified plan price
-    if (item.planKey) {
-      const standardPrice = PLAN_PRICES[item.planKey.toUpperCase()];
-      if (standardPrice !== undefined) {
-        itemPrice = standardPrice;
+  const verifiedItems = await Promise.all(
+    cartItems.map(async (item: any) => {
+      let itemPrice = Number(item.price) || 0;
+      
+      // If it's a known plan, strictly enforce verified plan price from DB
+      if (item.planKey) {
+        const standardPrice = await getAuthoritativePlanPrice(item.planKey);
+        if (standardPrice !== null) {
+          itemPrice = standardPrice;
+        }
       }
-    }
-    
-    const qty = Math.max(1, parseInt(item.quantity, 10) || 1);
-    subtotal += itemPrice * qty;
+      
+      const qty = Math.max(1, parseInt(item.quantity, 10) || 1);
+      subtotal += itemPrice * qty;
 
-    return {
-      productId: item.productId || item.id || item.planKey,
-      name: item.name || 'Studio Plan',
-      price: itemPrice,
-      quantity: qty,
-      image: item.image || '',
-      planKey: item.planKey || undefined,
-      description: item.description || '',
-    };
-  });
+      return {
+        productId: item.productId || item.id || item.planKey,
+        name: item.name || 'Studio Plan',
+        price: itemPrice,
+        quantity: qty,
+        image: item.image || '',
+        planKey: item.planKey || undefined,
+        description: item.description || '',
+      };
+    })
+  );
 
   const discount = 0;
   const shippingCharge = 0; // Digital subscription
@@ -117,7 +126,7 @@ export const createOrderSession = async (req: AuthRequest, res: Response) => {
     }
 
     // 4. Server-Side Price & Total Calculation (NEVER trust frontend total)
-    const { subtotal, discount, shippingCharge, tax, totalAmount, verifiedItems } = calculateServerTotals(cartItems);
+    const { subtotal, discount, shippingCharge, tax, totalAmount, verifiedItems } = await calculateServerTotals(cartItems);
 
     if (totalAmount <= 0) {
       return res.status(400).json({ error: 'Invalid order amount' });
@@ -172,7 +181,7 @@ export const createOrderSession = async (req: AuthRequest, res: Response) => {
       razorpayOrderId: rzpOrder.id,
       amount: rzpOrder.amount, // in paise
       currency: rzpOrder.currency || 'INR',
-      key: process.env.RAZORPAY_KEY_ID || 'rzp_test_TCrfzMZeYCcbsJ',
+      key: process.env.RAZORPAY_KEY_ID || '',
       customerDetails: newOrder.customerDetails,
     });
   } catch (err: any) {
@@ -458,7 +467,7 @@ export const verifyCancelOTP = async (req: AuthRequest, res: Response) => {
  */
 export const handleRazorpayWebhook = async (req: Request, res: Response) => {
   const signature = req.headers['x-razorpay-signature'] as string;
-  const rawBody = JSON.stringify(req.body);
+  const rawBody = (req as any).rawBody ? (req as any).rawBody.toString('utf8') : JSON.stringify(req.body);
 
   try {
     if (!verifyWebhookSignature(rawBody, signature)) {

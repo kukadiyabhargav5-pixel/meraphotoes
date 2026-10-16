@@ -331,15 +331,16 @@ export const getEventMedia = async (req: Request, res: Response) => {
       query.type = type;
     }
 
-    const mediaList = await Media.find(query).sort({ createdAt: -1 });
-    const sanitizedMedia = mediaList.map((m) => {
-      const doc: any = m.toObject();
+    const mediaList = await Media.find(query).sort({ createdAt: -1 }).lean();
+    const sanitizedMedia = mediaList.map((doc: any) => {
       if (doc.r2Url) doc.r2Url = getFileUrl(doc.r2Url);
       if (doc.compressedUrl) doc.compressedUrl = getFileUrl(doc.compressedUrl);
       if (doc.thumbnailUrl) doc.thumbnailUrl = getFileUrl(doc.thumbnailUrl);
       return doc;
     });
 
+    // Cache gallery media for 60 seconds with stale-while-revalidate for blazing fast speed
+    res.setHeader('Cache-Control', 'public, max-age=30, stale-while-revalidate=120');
     return res.json({ media: sanitizedMedia });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });

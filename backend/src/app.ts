@@ -28,6 +28,7 @@ const corsOptions: cors.CorsOptions = {
     const frontendUrl = process.env.FRONTEND_URL;
     const clientUrl = process.env.CLIENT_URL;
     const isAllowed = 
+      process.env.NODE_ENV !== 'production' ||
       origin.includes('localhost') || 
       origin.includes('127.0.0.1') ||
       origin.includes('10.') ||
@@ -36,8 +37,7 @@ const corsOptions: cors.CorsOptions = {
       origin.endsWith('.vercel.app') || 
       (Boolean(frontendUrl) && origin === frontendUrl) ||
       (Boolean(clientUrl) && origin === clientUrl) ||
-      origin.includes('techaarambh') ||
-      process.env.NODE_ENV !== 'production';
+      origin.includes('techaarambh');
 
     if (isAllowed) {
       callback(null, true);
@@ -47,12 +47,16 @@ const corsOptions: cors.CorsOptions = {
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
 };
 
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({ 
+  limit: '50mb',
+  verify: (req: any, _res, buf) => {
+    req.rawBody = buf;
+  }
+}));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 app.use('/api', limiter);
@@ -99,6 +103,7 @@ app.use((err: any, req: Request, res: Response, next: NextFunction) => {
 
 import { initializeQdrant } from './services/qdrantService';
 import { startEventRetentionScheduler } from './services/eventRetentionService';
+import { seedDefaultPlans } from './controllers/pricingController';
 
 // ── AI Service Keep-Alive Pinger ──────────────────────────────────
 // Prevents Render free-tier from sleeping the AI service after 5 min inactivity.
@@ -143,18 +148,46 @@ const startAiKeepAlive = () => {
 
 // Connect to MongoDB & Start Server
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/maraphoto';
-console.log('Connecting to database...');
+console.log('Connecting to database with connection pool...');
+
 mongoose
-  .connect(MONGO_URI)
-  .then(async () => {
+  .connect(MONGO_URI, {
+    maxPoolSize: 25,
+    minPoolSize: 5,
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 45000,
+  })
+  .then(() => {
     console.log('Connected to MongoDB Database successfully.');
-    await initializeQdrant();
-    startEventRetentionScheduler();
-    app.listen(PORT, () => {
+    
+    // Start listening immediately to satisfy Render health check instantly
+    const server = app.listen(PORT, () => {
       console.log(`Backend server running on port ${PORT}`);
-      // Start AI service keep-alive after server is ready
+      // Non-blocking background initializations
+      initializeQdrant().catch((err) => console.warn('[Qdrant] Background init notice:', err?.message));
+      seedDefaultPlans().catch((err) => console.warn('[PricingPlans] Init notice:', err?.message));
+      startEventRetentionScheduler();
       startAiKeepAlive();
     });
+
+    // Graceful shutdown handling for zero downtime deployments
+    const gracefulShutdown = async (signal: string) => {
+      console.log(`[Server] Received ${signal}. Starting graceful shutdown...`);
+      if (aiKeepAliveTimer) clearInterval(aiKeepAliveTimer);
+      server.close(async () => {
+        console.log('[Server] Closed HTTP server.');
+        try {
+          await mongoose.connection.close(false);
+          console.log('[Server] Closed MongoDB connection.');
+        } catch (e) {
+          console.error('[Server] Error closing MongoDB:', e);
+        }
+        process.exit(0);
+      });
+    };
+
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
   })
   .catch((err) => {
     console.error('Database connection failure:', err);

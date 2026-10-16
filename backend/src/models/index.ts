@@ -10,6 +10,7 @@ export * from './Bill';
 export * from './ClientTicket';
 
 export * from './Order';
+export * from './SearchSession';
 
 export { default as Bill } from './Bill';
 export { default as Booking } from './Booking';
@@ -18,4 +19,5 @@ export { default as Quotation } from './Quotation';
 export { default as ShootLog } from './ShootLog';
 export { default as GalleryVisitor } from './GalleryVisitor';
 export { default as Order } from './Order';
-
+export * from './PricingPlan';
+export { default as PricingPlan } from './PricingPlan';

@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { createEvent, getMyEvents, getEventByCode, verifyEventPassword, getEventQRCode, updateEvent, requestEventOtp, verifyEventOtp, deleteEvent, updatePortfolioStatus } from '../controllers/eventController';
+import { createEvent, getMyEvents, getEventByCode, verifyEventPassword, getEventQRCode, updateEvent, requestEventOtp, verifyEventOtp, deleteEvent, updatePortfolioStatus, updateDownloadStatus } from '../controllers/eventController';
 import { faceSearch } from '../controllers/searchController';
 import { authenticateJWT, requireRoles } from '../middlewares/auth';
 import multer from 'multer';
@@ -16,6 +16,7 @@ router.post('/', authenticateJWT, requireRoles(['STUDIO_OWNER', 'TEAM_MEMBER', '
 router.get('/my', authenticateJWT, requireRoles(['STUDIO_OWNER', 'TEAM_MEMBER', 'CLIENT']), getMyEvents);
 router.put('/:eventId', authenticateJWT, requireRoles(['STUDIO_OWNER', 'TEAM_MEMBER', 'CLIENT']), updateEvent);
 router.patch('/:eventId/portfolio-status', authenticateJWT, requireRoles(['STUDIO_OWNER', 'TEAM_MEMBER', 'CLIENT']), updatePortfolioStatus);
+router.patch('/:eventId/download-status', authenticateJWT, requireRoles(['STUDIO_OWNER', 'TEAM_MEMBER', 'CLIENT']), updateDownloadStatus);
 router.delete('/:eventId', authenticateJWT, requireRoles(['STUDIO_OWNER', 'TEAM_MEMBER', 'CLIENT']), deleteEvent);
 
 // Public / Guest gallery routes

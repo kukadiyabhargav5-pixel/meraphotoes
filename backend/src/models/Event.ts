@@ -24,6 +24,7 @@ export interface IEvent extends Document {
   studioId: mongoose.Types.ObjectId;
   assignedTeamMembers: mongoose.Types.ObjectId[];
   addToPortfolio?: boolean;
+  allowDownload?: boolean;
   watermark?: {
     isActive: boolean;
     type: 'TEXT' | 'LOGO';
@@ -68,6 +69,7 @@ const EventSchema = new Schema<IEvent>({
   studioId: { type: Schema.Types.ObjectId, ref: 'Studio', required: true },
   assignedTeamMembers: [{ type: Schema.Types.ObjectId, ref: 'User' }],
   addToPortfolio: { type: Boolean, default: false },
+  allowDownload: { type: Boolean, default: true },
   watermark: {
     isActive: { type: Boolean, default: false },
     type: { type: String, enum: ['TEXT', 'LOGO'], default: 'LOGO' },
@@ -87,5 +89,9 @@ const EventSchema = new Schema<IEvent>({
 }, {
   timestamps: true
 });
+
+// Performance indexes for studio event listings and guest gallery lookup
+EventSchema.index({ studioId: 1, createdAt: -1 });
+EventSchema.index({ studioId: 1, date: -1 });
 
 export const Event = mongoose.model<IEvent>('Event', EventSchema);
