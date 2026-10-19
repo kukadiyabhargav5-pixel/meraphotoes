@@ -1,13 +1,13 @@
+import dotenv from 'dotenv';
+dotenv.config();
+
 import express, { Request, Response, NextFunction } from 'express';
 import mongoose from 'mongoose';
 import cors from 'cors';
-import dotenv from 'dotenv';
 import rateLimit from 'express-rate-limit';
 import path from 'path';
 import axios from 'axios';
 import apiRouter from './routes';
-
-dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;

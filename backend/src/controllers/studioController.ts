@@ -211,7 +211,7 @@ export const getStudioCredits = async (req: AuthRequest, res: Response) => {
     if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
 
     const adminUser = isSuperAdmin(req.user);
-    let studio: any = await Studio.findOne({ ownerId: req.user._id }).select('name subscriptionPlan usage subscriptionStartDate subscriptionExpiresAt').lean();
+    let studio: any = await Studio.findOne({ ownerId: req.user._id }).select('name logoUrl subscriptionPlan usage subscriptionStartDate subscriptionExpiresAt').lean();
     if (!studio && adminUser) {
       const created = await Studio.create({
         name: 'Super Admin Studio',
@@ -225,7 +225,8 @@ export const getStudioCredits = async (req: AuthRequest, res: Response) => {
     if (!studio) return res.status(404).json({ error: 'Studio profile not found' });
 
     const credits = await calculateStudioCredits(studio._id, studio.subscriptionPlan, studio, adminUser);
-    return res.json({ credits, studio: { name: studio.name, subscriptionPlan: studio.subscriptionPlan || (adminUser ? 'PREMIUM' : 'BASIC') } });
+    const logoUrl = studio.logoUrl ? getFileUrl(studio.logoUrl) : null;
+    return res.json({ credits, studio: { name: studio.name, logoUrl, subscriptionPlan: studio.subscriptionPlan || (adminUser ? 'PREMIUM' : 'BASIC') } });
   } catch (err: any) {
     console.error('getStudioCredits error:', err);
     return res.status(500).json({ error: err.message });

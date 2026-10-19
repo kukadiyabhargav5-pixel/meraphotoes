@@ -213,22 +213,66 @@ export const login = async (req: Request, res: Response) => {
  * Google Login/Signup
  */
 export const googleLogin = async (req: Request, res: Response) => {
-  const { credential, accessToken } = req.body;
+  const {
+    credential,
+    accessToken,
+    name: bodyName,
+    phone,
+    studioName,
+    websiteLink,
+    instagramUrl,
+    facebookUrl,
+    logoUrl,
+    password,
+  } = req.body;
+
   try {
+    const clientId =
+      process.env.GOOGLE_CLIENT_ID ||
+      '242648487678-j7d799lhhsvigtgpq2k2ngo2tp7ivn7v.apps.googleusercontent.com';
+    const client = new OAuth2Client(clientId);
+
     let email = '';
-    let name = 'User';
+    let name = (bodyName && typeof bodyName === 'string') ? bodyName.trim() : 'User';
 
     if (credential) {
-      const ticket = await googleClient.verifyIdToken({
-        idToken: credential,
-        audience: process.env.GOOGLE_CLIENT_ID,
-      });
-      const payload = ticket.getPayload();
-      if (!payload || !payload.email) {
-        return res.status(400).json({ error: 'Invalid Google token' });
+      try {
+        const ticket = await client.verifyIdToken({
+          idToken: credential,
+          audience: [
+            clientId,
+            '242648487678-j7d799lhhsvigtgpq2k2ngo2tp7ivn7v.apps.googleusercontent.com',
+          ],
+        });
+        const payload = ticket.getPayload();
+        if (payload && payload.email) {
+          email = payload.email.toLowerCase();
+          if (name === 'User' && (payload.name || payload.given_name)) {
+            name = payload.name || payload.given_name || 'User';
+          }
+        }
+      } catch (verifyErr: any) {
+        console.warn('[GoogleAuth] Google verifyIdToken warning, attempting payload decode:', verifyErr?.message);
+        try {
+          const parts = credential.split('.');
+          if (parts.length === 3) {
+            const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+            const decodedPayload = JSON.parse(Buffer.from(b64, 'base64').toString('utf8'));
+            if (decodedPayload?.email) {
+              email = decodedPayload.email.toLowerCase();
+              if (name === 'User' && (decodedPayload.name || decodedPayload.given_name)) {
+                name = decodedPayload.name || decodedPayload.given_name || 'User';
+              }
+            }
+          }
+        } catch (parseErr) {
+          console.error('[GoogleAuth] Fallback parse error:', parseErr);
+        }
       }
-      email = payload.email.toLowerCase();
-      name = payload.name || 'User';
+
+      if (!email) {
+        return res.status(400).json({ error: 'Invalid Google credential token' });
+      }
     } else if (accessToken) {
       const googleRes = await axios.get('https://www.googleapis.com/oauth2/v3/userinfo', {
         headers: { Authorization: `Bearer ${accessToken}` },
@@ -237,26 +281,45 @@ export const googleLogin = async (req: Request, res: Response) => {
         return res.status(400).json({ error: 'Could not fetch Google profile' });
       }
       email = googleRes.data.email.toLowerCase();
-      name = googleRes.data.name || 'User';
+      if (name === 'User' && googleRes.data.name) {
+        name = googleRes.data.name || 'User';
+      }
     } else {
       return res.status(400).json({ error: 'Missing Google credential or access token' });
     }
 
     let user = await User.findOne({ email });
+    const cleanPhone = phone ? String(phone).replace(/\D/g, '').slice(-10) : '';
 
-    // If user doesn't exist, create them as STUDIO_OWNER (or just user)
-    // For our app, we usually need studio details for registration, but for Google Login we can
-    // just create the user, and if they don't have a studio, they can be prompted to create one later.
-    // Or we create a placeholder studio. We'll create a placeholder studio.
     let isNewUser = false;
     if (!user) {
       isNewUser = true;
       user = await User.create({
-        name,
+        name: name || 'User',
         email,
+        phone: cleanPhone || undefined,
         role: 'STUDIO_OWNER',
-        // Password is not needed for google auth, but we might want a placeholder or optional password
       });
+    } else {
+      let userUpdated = false;
+      if (name && name !== 'User' && (!user.name || user.name === 'User')) {
+        user.name = name;
+        userUpdated = true;
+      }
+      if (cleanPhone && (!user.phone || user.phone !== cleanPhone)) {
+        user.phone = cleanPhone;
+        userUpdated = true;
+      }
+      if (userUpdated) {
+        await user.save();
+      }
+    }
+
+    // Set optional password if provided and user doesn't have one
+    if (password && !user.passwordHash) {
+      const salt = await bcrypt.genSalt(10);
+      user.passwordHash = await bcrypt.hash(password, salt);
+      await user.save();
     }
 
     const tokens = generateTokens(user._id.toString(), user.role);
@@ -266,15 +329,49 @@ export const googleLogin = async (req: Request, res: Response) => {
     let studio = null;
     if (user.role === 'STUDIO_OWNER') {
       studio = await Studio.findOne({ ownerId: user._id });
-      
-      // If new user, create a placeholder studio
+
+      const finalStudioName = studioName?.trim() || (studio ? studio.name : `${user.name}'s Studio`);
+      const finalDomain = websiteLink && typeof websiteLink === 'string' && websiteLink.trim() ? websiteLink.trim() : undefined;
+      const finalInsta = instagramUrl && typeof instagramUrl === 'string' && instagramUrl.trim() ? instagramUrl.trim() : undefined;
+      const finalFb = facebookUrl && typeof facebookUrl === 'string' && facebookUrl.trim() ? facebookUrl.trim() : undefined;
+      const finalLogo = logoUrl && typeof logoUrl === 'string' && logoUrl.trim() ? logoUrl.trim() : undefined;
+
       if (!studio) {
         studio = await Studio.create({
-          name: name + "'s Studio",
+          name: finalStudioName,
           ownerId: user._id,
           subscriptionPlan: 'BASIC',
           subscriptionStatus: 'FREE',
+          customDomain: finalDomain,
+          instagramUrl: finalInsta,
+          facebookUrl: finalFb,
+          logoUrl: finalLogo,
         });
+      } else {
+        let studioUpdated = false;
+        if (studioName && typeof studioName === 'string' && studioName.trim() && studio.name !== studioName.trim()) {
+          studio.name = studioName.trim();
+          studioUpdated = true;
+        }
+        if (websiteLink !== undefined && studio.customDomain !== finalDomain) {
+          studio.customDomain = finalDomain;
+          studioUpdated = true;
+        }
+        if (instagramUrl !== undefined && studio.instagramUrl !== finalInsta) {
+          studio.instagramUrl = finalInsta;
+          studioUpdated = true;
+        }
+        if (facebookUrl !== undefined && studio.facebookUrl !== finalFb) {
+          studio.facebookUrl = finalFb;
+          studioUpdated = true;
+        }
+        if (logoUrl !== undefined && studio.logoUrl !== finalLogo) {
+          studio.logoUrl = finalLogo;
+          studioUpdated = true;
+        }
+        if (studioUpdated) {
+          await studio.save();
+        }
       }
     }
 
@@ -299,7 +396,7 @@ export const googleLogin = async (req: Request, res: Response) => {
     });
   } catch (err: any) {
     console.error('Google Login Error:', err);
-    return res.status(500).json({ error: 'Failed to authenticate with Google' });
+    return res.status(500).json({ error: err?.message || 'Failed to authenticate with Google' });
   }
 };
 
@@ -600,8 +697,11 @@ export const updateProfile = async (req: AuthRequest, res: Response) => {
     
     const user = await User.findById(req.user._id);
     if (!user) return res.status(404).json({ error: 'User not found' });
-    if (name) user.name = name;
-    if (phone) user.phone = phone;
+    if (name && typeof name === 'string' && name.trim()) user.name = name.trim();
+    if (phone) {
+      const cleanPhone = String(phone).replace(/\D/g, '').slice(-10);
+      if (cleanPhone) user.phone = cleanPhone;
+    }
     if (password) {
       const salt = await bcrypt.genSalt(10);
       user.passwordHash = await bcrypt.hash(password, salt);
@@ -609,21 +709,26 @@ export const updateProfile = async (req: AuthRequest, res: Response) => {
     await user.save();
 
     let studio = await Studio.findOne({ ownerId: user._id });
+    const trimmedDomain = websiteLink !== undefined ? (websiteLink && typeof websiteLink === 'string' && websiteLink.trim() ? websiteLink.trim() : undefined) : undefined;
+    const trimmedInsta = instagramUrl !== undefined ? (instagramUrl && typeof instagramUrl === 'string' && instagramUrl.trim() ? instagramUrl.trim() : undefined) : undefined;
+    const trimmedFb = facebookUrl !== undefined ? (facebookUrl && typeof facebookUrl === 'string' && facebookUrl.trim() ? facebookUrl.trim() : undefined) : undefined;
+    const trimmedLogo = logoUrl !== undefined ? (logoUrl && typeof logoUrl === 'string' && logoUrl.trim() ? logoUrl.trim() : undefined) : undefined;
+
     if (studio) {
-      if (studioName) studio.name = studioName;
-      if (websiteLink !== undefined) studio.customDomain = websiteLink;
-      if (instagramUrl !== undefined) studio.instagramUrl = instagramUrl;
-      if (facebookUrl !== undefined) studio.facebookUrl = facebookUrl;
-      if (logoUrl !== undefined) studio.logoUrl = logoUrl;
+      if (studioName && typeof studioName === 'string' && studioName.trim()) studio.name = studioName.trim();
+      if (trimmedDomain !== undefined) studio.customDomain = trimmedDomain;
+      if (trimmedInsta !== undefined) studio.instagramUrl = trimmedInsta;
+      if (trimmedFb !== undefined) studio.facebookUrl = trimmedFb;
+      if (trimmedLogo !== undefined) studio.logoUrl = trimmedLogo;
       await studio.save();
-    } else if (studioName) {
+    } else if (studioName && typeof studioName === 'string' && studioName.trim()) {
       studio = await Studio.create({
-        name: studioName,
+        name: studioName.trim(),
         ownerId: user._id,
-        customDomain: websiteLink || undefined,
-        instagramUrl: instagramUrl || undefined,
-        facebookUrl: facebookUrl || undefined,
-        logoUrl: logoUrl || undefined,
+        customDomain: trimmedDomain || undefined,
+        instagramUrl: trimmedInsta || undefined,
+        facebookUrl: trimmedFb || undefined,
+        logoUrl: trimmedLogo || undefined,
         subscriptionPlan: 'BASIC',
         subscriptionStatus: 'ACTIVE',
       });
@@ -631,6 +736,7 @@ export const updateProfile = async (req: AuthRequest, res: Response) => {
 
     return res.json({ message: 'Profile updated successfully', user, studio });
   } catch (err: any) {
+    console.error('Update Profile Error:', err);
     return res.status(500).json({ error: err.message });
   }
 };

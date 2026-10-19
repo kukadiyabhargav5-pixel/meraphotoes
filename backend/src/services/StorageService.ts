@@ -37,6 +37,11 @@ export const getFileUrl = (key: string): string => {
     (process.env.NODE_ENV === 'production' ? 'https://meraphotoes.onrender.com' : 'http://localhost:5000')
   ).replace(/\/+$/, '');
 
+  // If key is a base64 data URI or blob URI, return it directly
+  if (key.startsWith('data:') || key.startsWith('blob:')) {
+    return key;
+  }
+
   // If key is already a full URL, sanitize any broken/localhost prefixes
   if (key.startsWith('http://') || key.startsWith('https://')) {
     if (key.includes('.r2.dev/')) {
