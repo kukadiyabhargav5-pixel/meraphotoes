@@ -1,0 +1,458 @@
+import { Response } from 'express';
+import { AuthRequest, isSuperAdmin } from '../middlewares/auth';
+import { Studio, User, Media } from '../models';
+import { getFileUrl } from '../services/StorageService';
+
+export const PLAN_STORAGE_LIMITS: Record<string, { photos: number; videos: number; name: string }> = {
+  BASIC: { photos: 5000, videos: 50, name: 'Basic Free' },
+  STARTUP: { photos: 50000, videos: 10, name: 'Startup' },
+  STARTER: { photos: 50000, videos: 10, name: 'Startup' },
+  STANDARD: { photos: 100000, videos: 20, name: 'Standard' },
+  ESSENTIAL: { photos: 150000, videos: 50, name: 'Essential' },
+  PREMIUM: { photos: 300000, videos: 100, name: 'Premium' },
+  ENTERPRISE: { photos: 300000, videos: 100, name: 'Premium' },
+  SUPER_ADMIN: { photos: 999999999, videos: 999999999, name: 'VIP Unlimited Admin (Free)' },
+};
+
+export const calculateStudioCredits = async (studioId: any, plan: string, cachedStudio?: any, isSuperAdminUser: boolean = false) => {
+  let planKey = (plan || 'BASIC').toUpperCase();
+
+  // Ensure complete studio record with subscriptionStartDate and usage is loaded
+  let studio = cachedStudio;
+  if (!studio || studio.subscriptionStartDate === undefined || studio.usage === undefined || studio.subscriptionExpiresAt === undefined) {
+    studio = await Studio.findById(studioId).select('name usage subscriptionExpiresAt subscriptionStartDate subscriptionPlan').lean();
+  }
+
+  if ((!plan || planKey === 'BASIC') && studio?.subscriptionPlan) {
+    planKey = studio.subscriptionPlan.toUpperCase();
+  }
+
+  // Resolve plan activation date. Any media uploaded before this date belongs to previous plans/events and never consumes current plan quota.
+  let planStart: Date;
+  if (studio?.subscriptionStartDate) {
+    planStart = new Date(studio.subscriptionStartDate);
+  } else {
+    planStart = new Date();
+    await Studio.findByIdAndUpdate(studioId, { $set: { subscriptionStartDate: planStart } });
+  }
+
+  const mediaDateFilter: any = { studioId, creditDeducted: true, createdAt: { $gte: planStart } };
+  const pendingDateFilter: any = { studioId, creditDeducted: false, createdAt: { $gte: planStart } };
+
+  const [creditedPhotos, creditedVideos, pendingPhotos, pendingVideos] = await Promise.all([
+    Media.countDocuments({ ...mediaDateFilter, type: 'PHOTO' }),
+    Media.countDocuments({ ...mediaDateFilter, type: 'VIDEO' }),
+    Media.countDocuments({ ...pendingDateFilter, type: 'PHOTO' }),
+    Media.countDocuments({ ...pendingDateFilter, type: 'VIDEO' })
+  ]);
+
+  if (isSuperAdminUser || planKey === 'SUPER_ADMIN') {
+    return {
+      plan: 'PREMIUM',
+      planName: 'VIP Admin (Unlimited Free Access)',
+      photos: {
+        totalLimit: 999999999,
+        used: creditedPhotos,
+        remaining: 999999999,
+        pendingSave: pendingPhotos,
+        projectedRemaining: 999999999,
+        percentUsed: 0,
+        rawPercent: 0
+      },
+      videos: {
+        totalLimit: 999999999,
+        used: creditedVideos,
+        remaining: 999999999,
+        pendingSave: pendingVideos,
+        projectedRemaining: 999999999,
+        percentUsed: 0,
+        rawPercent: 0
+      }
+    };
+  }
+
+  // Expiration Check Logic - downgrade to BASIC if expired
+  if (studio?.subscriptionExpiresAt && new Date(studio.subscriptionExpiresAt) < new Date() && planKey !== 'BASIC') {
+    planKey = 'BASIC';
+    await Studio.findByIdAndUpdate(studioId, {
+      $set: {
+        subscriptionPlan: 'BASIC',
+        subscriptionStatus: 'ACTIVE',
+        subscriptionStartDate: new Date(),
+        subscriptionExpiresAt: null,
+        'usage.photosUploaded': 0,
+        'usage.videosUploaded': 0
+      }
+    });
+  }
+
+  const limits = PLAN_STORAGE_LIMITS[planKey] || PLAN_STORAGE_LIMITS.BASIC;
+
+  // Consumed quota for the current plan cycle is strictly the media deducted since planStart.
+  // Synchronize studio usage counters in DB so they reflect current active plan usage.
+  const totalPhotosUsed = creditedPhotos;
+  const totalVideosUsed = creditedVideos;
+
+  if ((studio?.usage?.photosUploaded ?? 0) !== creditedPhotos || (studio?.usage?.videosUploaded ?? 0) !== creditedVideos) {
+    await Studio.findByIdAndUpdate(studioId, {
+      $set: {
+        'usage.photosUploaded': creditedPhotos,
+        'usage.videosUploaded': creditedVideos
+      }
+    });
+  }
+
+  const photoPercent = limits.photos > 0 ? (totalPhotosUsed / limits.photos) * 100 : 0;
+  const videoPercent = limits.videos > 0 ? (totalVideosUsed / limits.videos) * 100 : 0;
+
+  return {
+    plan: planKey,
+    planName: limits.name,
+    photos: {
+      totalLimit: limits.photos,
+      used: totalPhotosUsed,
+      remaining: Math.max(0, limits.photos - totalPhotosUsed),
+      pendingSave: pendingPhotos,
+      projectedRemaining: Math.max(0, limits.photos - totalPhotosUsed - pendingPhotos),
+      percentUsed: Number(photoPercent.toFixed(2)),
+      rawPercent: photoPercent
+    },
+    videos: {
+      totalLimit: limits.videos,
+      used: totalVideosUsed,
+      remaining: Math.max(0, limits.videos - totalVideosUsed),
+      pendingSave: pendingVideos,
+      projectedRemaining: Math.max(0, limits.videos - totalVideosUsed - pendingVideos),
+      percentUsed: Number(videoPercent.toFixed(2)),
+      rawPercent: videoPercent
+    }
+  };
+};
+
+/**
+ * Get profile of current authenticated studio owner
+ */
+export const getMyStudio = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+    let studio = await Studio.findOne({ ownerId: req.user._id });
+    if (!studio) {
+      // Auto-upgrade user's role to STUDIO_OWNER if they are a CLIENT
+      const user = await User.findById(req.user._id);
+      if (user) {
+        if (user.role === 'CLIENT') {
+          user.role = 'STUDIO_OWNER';
+          await user.save();
+          req.user.role = 'STUDIO_OWNER';
+        }
+      }
+
+      // Auto-create a default Studio profile
+      const cleanName = (user ? user.name : 'Mara') + ' Studio';
+      
+      studio = await Studio.create({
+        name: cleanName,
+        ownerId: req.user._id,
+        subscriptionPlan: 'BASIC',
+        subscriptionStatus: 'ACTIVE',
+        subscriptionStartDate: new Date(),
+      });
+    } else {
+      // Check if user is STUDIO_OWNER in DB
+      const user = await User.findById(req.user._id);
+      if (user && user.role === 'CLIENT') {
+        user.role = 'STUDIO_OWNER';
+        await user.save();
+        req.user.role = 'STUDIO_OWNER';
+      }
+    }
+
+    const adminUser = isSuperAdmin(req.user);
+    if (adminUser) {
+      if (!studio) {
+        studio = await Studio.create({
+          name: 'Super Admin Studio',
+          ownerId: req.user._id,
+          subscriptionPlan: 'PREMIUM',
+          subscriptionStatus: 'ACTIVE',
+          subscriptionExpiresAt: new Date('2099-12-31'),
+        });
+      } else if (!studio.subscriptionPlan) {
+        studio.subscriptionPlan = 'PREMIUM';
+        studio.subscriptionStatus = 'ACTIVE';
+        studio.subscriptionExpiresAt = new Date('2099-12-31');
+        await studio.save();
+      }
+    }
+
+    const credits = await calculateStudioCredits(studio._id, studio.subscriptionPlan, studio, adminUser);
+
+    const studioObj = studio.toObject ? studio.toObject() : { ...studio };
+    if (studioObj.logoUrl) {
+      studioObj.logoUrl = getFileUrl(studioObj.logoUrl);
+    }
+    if (studioObj.watermark && studioObj.watermark.logoUrl) {
+      studioObj.watermark.logoUrl = getFileUrl(studioObj.watermark.logoUrl);
+    }
+
+    return res.json({ studio: studioObj, credits });
+  } catch (err: any) {
+    console.error('getMyStudio error:', err);
+    return res.status(500).json({ error: err.message });
+  }
+};
+
+/**
+ * Get real-time storage credits for current studio
+ */
+export const getStudioCredits = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const adminUser = isSuperAdmin(req.user);
+    let studio: any = await Studio.findOne({ ownerId: req.user._id }).select('name subscriptionPlan usage subscriptionStartDate subscriptionExpiresAt').lean();
+    if (!studio && adminUser) {
+      const created = await Studio.create({
+        name: 'Super Admin Studio',
+        ownerId: req.user._id,
+        subscriptionPlan: 'PREMIUM',
+        subscriptionStatus: 'ACTIVE',
+        subscriptionExpiresAt: new Date('2099-12-31'),
+      });
+      studio = created.toObject();
+    }
+    if (!studio) return res.status(404).json({ error: 'Studio profile not found' });
+
+    const credits = await calculateStudioCredits(studio._id, studio.subscriptionPlan, studio, adminUser);
+    return res.json({ credits, studio: { name: studio.name, subscriptionPlan: studio.subscriptionPlan || (adminUser ? 'PREMIUM' : 'BASIC') } });
+  } catch (err: any) {
+    console.error('getStudioCredits error:', err);
+    return res.status(500).json({ error: err.message });
+  }
+};
+
+/**
+ * Update studio configuration details (Branding, Watermark, Domain)
+ */
+export const updateMyStudio = async (req: AuthRequest, res: Response) => {
+  const { name, logoUrl, customDomain, watermark, paymentDetails, instagramUrl, facebookUrl } = req.body;
+
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+    // Update user profile if provided
+    const { userName, userPhone } = req.body;
+    if (userName !== undefined || userPhone !== undefined) {
+      const user = await User.findById(req.user._id);
+      if (user) {
+        if (userName !== undefined) user.name = userName;
+        if (userPhone !== undefined) user.phone = userPhone;
+        await user.save();
+      }
+    }
+
+    const studio = await Studio.findOne({ ownerId: req.user._id });
+    if (!studio) {
+      return res.status(404).json({ error: 'Studio profile not found' });
+    }
+
+    if (name) studio.name = name;
+    if (logoUrl !== undefined) {
+      if (logoUrl && typeof logoUrl === 'string' && logoUrl.startsWith('data:image/')) {
+        try {
+          const parts = logoUrl.split(',');
+          const base64Data = parts[1];
+          const buffer = Buffer.from(base64Data, 'base64');
+          const { uploadFile } = await import('../services/StorageService');
+          const { url } = await uploadFile(buffer, 'studios/logos');
+          studio.logoUrl = url;
+          if (studio.watermark) studio.watermark.logoUrl = url;
+        } catch (uploadErr) {
+          console.error('Failed to convert base64 logo to cloud URL, storing directly:', uploadErr);
+          studio.logoUrl = logoUrl;
+        }
+      } else {
+        studio.logoUrl = logoUrl;
+        if (studio.watermark && logoUrl) studio.watermark.logoUrl = logoUrl;
+      }
+    }
+    if (instagramUrl !== undefined) studio.instagramUrl = instagramUrl;
+    if (facebookUrl !== undefined) studio.facebookUrl = facebookUrl;
+
+    if (customDomain !== undefined) {
+      if (customDomain) {
+        const cleanDom = customDomain.toLowerCase().trim();
+        const existing = await Studio.findOne({ customDomain: cleanDom, _id: { $ne: studio._id } });
+        if (existing) {
+          return res.status(400).json({ error: 'Custom domain is already registered by another studio' });
+        }
+        studio.customDomain = cleanDom;
+      } else {
+        studio.customDomain = undefined; // Delete custom domain
+      }
+    }
+
+    if (watermark) {
+      studio.watermark = {
+        type: watermark.type || studio.watermark.type,
+        text: watermark.text !== undefined ? watermark.text : studio.watermark.text,
+        logoUrl: watermark.logoUrl !== undefined ? watermark.logoUrl : studio.watermark.logoUrl,
+        position: watermark.position || studio.watermark.position,
+        opacity: watermark.opacity !== undefined ? watermark.opacity : studio.watermark.opacity,
+        size: watermark.size !== undefined ? watermark.size : studio.watermark.size,
+      };
+    }
+
+    if (paymentDetails) {
+      if (!studio.paymentDetails) {
+        studio.paymentDetails = { upiId: '', merchantName: '', uploadedQrUrl: '' };
+      }
+      if (paymentDetails.upiId !== undefined) studio.paymentDetails.upiId = paymentDetails.upiId;
+      if (paymentDetails.merchantName !== undefined) studio.paymentDetails.merchantName = paymentDetails.merchantName;
+      if (paymentDetails.uploadedQrUrl !== undefined) studio.paymentDetails.uploadedQrUrl = paymentDetails.uploadedQrUrl;
+    }
+
+    await studio.save();
+    return res.json({ message: 'Studio updated successfully', studio });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+};
+
+/**
+ * Direct file upload for Studio Logo
+ */
+export const uploadStudioLogo = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const file = req.file || (req.files && Array.isArray(req.files) ? req.files[0] : null);
+    if (!file) {
+      return res.status(400).json({ error: 'No logo image file uploaded' });
+    }
+
+    // Validate MIME type
+    const validMimes = ['image/jpeg', 'image/png', 'image/webp', 'image/svg+xml'];
+    if (file.mimetype && !validMimes.includes(file.mimetype)) {
+      return res.status(400).json({ error: 'Invalid file format. Please upload JPG, PNG, WEBP, or SVG.' });
+    }
+
+    let studio = await Studio.findOne({ ownerId: req.user._id });
+    if (!studio) {
+      studio = await Studio.create({
+        name: (req.user.name || 'Mara') + ' Studio',
+        ownerId: req.user._id,
+        subscriptionPlan: 'BASIC',
+        subscriptionStatus: 'ACTIVE',
+      });
+    }
+
+    const { uploadFile, deleteFile } = await import('../services/StorageService');
+
+    // Store in structured R2 path: studios/{studioId}/logo/{filename}
+    const folder = `studios/${studio._id}/logo`;
+    const { url, publicId } = await uploadFile(file.buffer, folder, file.mimetype, file.originalname);
+
+    // If previous logo key exists and is different, cleanup old logo from R2
+    if (studio.logoKey && studio.logoKey !== publicId) {
+      deleteFile(studio.logoKey).catch((delErr) => console.warn('[Logo] Old logo cleanup notice:', delErr));
+    }
+
+    studio.logoUrl = url;
+    studio.logoKey = publicId;
+    if (!studio.watermark) {
+      studio.watermark = { type: 'NONE', opacity: 0.5, size: 50, position: 'BOTTOM_RIGHT' };
+    }
+    studio.watermark.logoUrl = url;
+    await studio.save();
+
+    return res.status(200).json({
+      success: true,
+      message: 'Studio logo uploaded and saved successfully',
+      logoUrl: url,
+      logoKey: publicId,
+      studio,
+    });
+  } catch (err: any) {
+    console.error('uploadStudioLogo error:', err);
+    return res.status(500).json({ error: err.message || 'Failed to upload studio logo' });
+  }
+};
+
+/**
+ * Delete studio logo safely from Cloudflare R2 and MongoDB
+ */
+export const deleteStudioLogo = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const studio = await Studio.findOne({ ownerId: req.user._id });
+    if (!studio) return res.status(404).json({ error: 'Studio not found' });
+
+    if (studio.logoKey) {
+      const { deleteFile } = await import('../services/StorageService');
+      await deleteFile(studio.logoKey).catch((e) => console.warn('Could not delete old R2 logo:', e));
+    }
+
+    studio.logoUrl = undefined;
+    studio.logoKey = undefined;
+    if (studio.watermark) {
+      studio.watermark.logoUrl = undefined;
+    }
+    await studio.save();
+
+    return res.status(200).json({
+      success: true,
+      message: 'Studio logo removed successfully',
+      studio,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message || 'Failed to remove studio logo' });
+  }
+};
+
+/**
+ * Update / Upgrade studio subscription plan (1 year duration)
+ */
+export const updateStudioPlan = async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.user) return res.status(401).json({ error: 'Unauthorized' });
+
+    const { plan, durationDays = 365 } = req.body;
+    const planKey = (plan || '').toUpperCase();
+    if (!planKey || !PLAN_STORAGE_LIMITS[planKey]) {
+      return res.status(400).json({ error: 'Invalid plan selected. Choose from: BASIC, STANDARD, ESSENTIAL, PREMIUM' });
+    }
+
+    const startDate = new Date();
+    const expiresAt = new Date(startDate.getTime() + durationDays * 24 * 60 * 60 * 1000);
+
+    const studio = await Studio.findOneAndUpdate(
+      { ownerId: req.user._id },
+      {
+        $set: {
+          subscriptionPlan: planKey,
+          subscriptionStatus: 'ACTIVE',
+          subscriptionStartDate: startDate,
+          subscriptionExpiresAt: expiresAt,
+          'usage.photosUploaded': 0,
+          'usage.videosUploaded': 0,
+        }
+      },
+      { new: true, upsert: true }
+    );
+
+    const credits = await calculateStudioCredits(studio._id, studio.subscriptionPlan);
+
+    return res.json({
+      success: true,
+      message: `Successfully activated ${credits.planName} plan for 1 year`,
+      studio,
+      credits,
+    });
+  } catch (err: any) {
+    console.error('updateStudioPlan error:', err);
+    return res.status(500).json({ error: err.message });
+  }
+};
